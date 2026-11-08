@@ -1,467 +1,342 @@
-#include "pm/commons/commons.hpp"
+// pm-llm — standalone agent CLI.
+// Opens the same encrypted settings profile Tanit uses
+// (pm://config/settings.json under the brand config directory) and applies
+// the shared llm-agent flags. The turn runner still lives in tanit until the
+// agent loop is linked here; `agent` resolves the profile and exits.
 
-namespace media {
-bool is_http_url(const std::string& s) {
-    return s.rfind("http://", 0) == 0 || s.rfind("https://", 0) == 0;
-}
-}
+#include "llm/agent_cli.hpp"
+#include "host/services.hpp"
+#include "pm_branding_config.hpp"
+#include "storage/secure_storage.hpp"
 
 #include <CLI/CLI.hpp>
 #include <nlohmann/json.hpp>
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
-#include <vector>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <shlobj.h>
+#include <windows.h>
+#endif
+
+namespace fs = std::filesystem;
 
 namespace {
 
-int status_for(const std::string& code) {
-    if (code == "EFORBIDDEN") return 403;
-    if (code == "ENOENT") return 404;
-    if (code == "EIO") return 500;
-    return 400;
+constexpr const char* k_settings_uri = "pm://config/settings.json";
+
+void emit(const nlohmann::json& body, int code)
+{
+    std::cout << body.dump(2) << "\n";
+    std::exit(code);
 }
 
-void emit(const nlohmann::json& body, bool ok) {
-    std::cout << body.dump() << "\n";
-    std::exit(ok ? 0 : 1);
+void emit_err(const std::string& message, int code = 1)
+{
+    emit({{"ok", false}, {"error", message}}, code);
 }
 
-void emit_ok(nlohmann::json body) {
-    body["ok"] = true;
-    emit(body, true);
-}
-
-void emit_err(const pm::commons::Error& err) {
-    nlohmann::json body;
-    body["ok"] = false;
-    body["error"] = err.message;
-    body["code"] = err.code.empty() ? "EFAIL" : err.code;
-    body["status"] = status_for(body["code"]);
-    emit(body, false);
-}
-
-void emit_err(std::string code, std::string message) {
-    emit_err(pm::commons::Error::make(std::move(code), std::move(message)));
-}
-
-void emit_path_err(const std::string& err) {
-    const auto colon = err.find(':');
-    if (colon != std::string::npos && colon > 0 && colon < 24)
-        emit_err(err.substr(0, colon), err);
-    emit_err("EFORBIDDEN", err);
-}
-
-struct Args {
-    std::string text;
-    std::string hay;
-    std::string query;
-    std::string pattern;
-    std::string rel;
-    std::string dir;
-    std::string kind;
-    std::string id;
-    std::string type;
-    std::string payload;
-    std::string name;
-    std::vector<std::string> sets;
-    std::vector<std::string> args;
-    std::vector<std::string> select;
-    std::vector<std::string> paths;
-    std::vector<std::string> exts;
-    bool force = false;
-    bool hex = false;
-    std::string replacement;
-    bool lenient = false;
-    bool reject_userinfo = false;
-    bool is_dir = false;
-    bool fold = false;
-    bool file = false;
-    bool alive = false;
-    int count = 1;
-    int priority = 0;
-    std::uint32_t high = 0;
-    std::uint32_t low = 0;
-    int self_priority = 0;
-    std::uint32_t seed = 1;
-    std::int64_t pid = 0;
-    std::int64_t self_pid = 0;
-    std::int64_t now = 0;
-};
-
-bool alive_hook(std::int64_t, void*) { return true; }
-
-int hex_nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-bool take_text(const Args& opt, std::string& out) {
-    if (!opt.hex) {
-        out = opt.text;
-        return true;
+std::string lower_ascii(std::string s)
+{
+    for (char& c : s) {
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c - 'A' + 'a');
     }
-    if (opt.text.size() % 2 != 0)
+    return s;
+}
+
+void redact(nlohmann::json& node)
+{
+    if (node.is_object()) {
+        for (auto it = node.begin(); it != node.end(); ++it) {
+            const std::string key = lower_ascii(it.key());
+            const bool secret = key.find("api_key") != std::string::npos
+                || key.find("apikey") != std::string::npos
+                || key.find("token") != std::string::npos
+                || key.find("secret") != std::string::npos
+                || key.find("password") != std::string::npos
+                || key == "key";
+            if (secret && it.value().is_string()) {
+                it.value() = it.value().get<std::string>().empty() ? "" : "***";
+                continue;
+            }
+            redact(it.value());
+        }
+        return;
+    }
+    if (node.is_array()) {
+        for (auto& item : node)
+            redact(item);
+    }
+}
+
+fs::path roaming_config_dir()
+{
+#if defined(_WIN32)
+    PWSTR raw = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &raw)) || !raw)
+        return {};
+    fs::path dir(raw);
+    CoTaskMemFree(raw);
+    return dir / pm::brand::k_config_subpath_w;
+#else
+    return {};
+#endif
+}
+
+fs::path resolve_config_dir(const std::string& flag)
+{
+    if (!flag.empty())
+        return fs::path(flag);
+    if (const char* env = std::getenv("PM_LLM_CONFIG_DIR"); env && *env)
+        return fs::path(env);
+    return roaming_config_dir();
+}
+
+bool read_file(const fs::path& path, std::string& out)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
         return false;
-    out.clear();
-    out.reserve(opt.text.size() / 2);
-    for (std::size_t i = 0; i < opt.text.size(); i += 2) {
-        const int hi = hex_nibble(opt.text[i]);
-        const int lo = hex_nibble(opt.text[i + 1]);
-        if (hi < 0 || lo < 0)
-            return false;
-        out.push_back(static_cast<char>((hi << 4) | lo));
-    }
+    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     return true;
+}
+
+nlohmann::json load_profile(const fs::path& config_dir, std::string& source, std::string& err)
+{
+    source.clear();
+    err.clear();
+    const auto paths = pm::storage::resolve_storage_paths(config_dir);
+    pm::storage::DocumentLoadPolicy policy;
+    policy.require_signature = true;
+    policy.require_encryption = true;
+    policy.allowed_trust = {pm::model::TrustLevel::UserLocal};
+    const auto loaded = pm::storage::load_or_import_seed_document(paths, k_settings_uri, policy);
+    if (loaded.ok) {
+        source = "encrypted";
+        const std::string text(reinterpret_cast<const char*>(loaded.document.data.data()),
+                               loaded.document.data.size());
+        auto parsed = nlohmann::json::parse(text, nullptr, false);
+        if (parsed.is_discarded())
+            err = "encrypted settings profile is not valid JSON";
+        return parsed;
+    }
+    if (loaded.error.rfind("document not found:", 0) != 0 && !loaded.error.empty()) {
+        err = loaded.error;
+        return {};
+    }
+    const fs::path plain = config_dir / "settings.json";
+    std::string text;
+    if (!read_file(plain, text)) {
+        err = "no encrypted settings profile and no settings.json under " + config_dir.string();
+        return {};
+    }
+    source = "settings.json";
+    return nlohmann::json::parse(text, nullptr, false);
+}
+
+const nlohmann::json* preset_list(const nlohmann::json& root)
+{
+    if (!root.is_object() || !root.contains("custom") || !root["custom"].is_object())
+        return nullptr;
+    const auto& custom = root["custom"];
+    if (!custom.contains("settings_chat_presets") || !custom["settings_chat_presets"].is_array())
+        return nullptr;
+    return &custom["settings_chat_presets"];
+}
+
+const nlohmann::json* find_preset(const nlohmann::json& root, const std::string& name)
+{
+    const auto* list = preset_list(root);
+    if (!list)
+        return nullptr;
+    const std::string needle = lower_ascii(name);
+    const nlohmann::json* marked_default = nullptr;
+    const nlohmann::json* named_default = nullptr;
+    int objects = 0;
+    const nlohmann::json* only = nullptr;
+    for (const auto& item : *list) {
+        if (!item.is_object())
+            continue;
+        ++objects;
+        only = &item;
+        const bool is_default = (item.contains("is_default") && item["is_default"].is_boolean() && item["is_default"].get<bool>())
+            || (item.contains("isDefault") && item["isDefault"].is_boolean() && item["isDefault"].get<bool>());
+        const std::string id = lower_ascii(item.value("id", std::string{}));
+        const std::string preset_name = lower_ascii(item.value("name", std::string{}));
+        if (!needle.empty()) {
+            if (id == needle || preset_name == needle)
+                return &item;
+            continue;
+        }
+        if (is_default && !marked_default)
+            marked_default = &item;
+        if ((id == "default" || preset_name == "default") && !named_default)
+            named_default = &item;
+    }
+    if (!needle.empty())
+        return nullptr;
+    if (marked_default)
+        return marked_default;
+    if (named_default)
+        return named_default;
+    if (objects == 1)
+        return only;
+    return nullptr;
+}
+
+nlohmann::json chat_from(const nlohmann::json& root, const nlohmann::json* preset)
+{
+    nlohmann::json chat = nlohmann::json::object();
+    if (preset && preset->contains("chat") && (*preset)["chat"].is_object())
+        chat = (*preset)["chat"];
+    else if (root.contains("chat") && root["chat"].is_object())
+        chat = root["chat"];
+    return chat;
+}
+
+void overlay_string(nlohmann::json& chat, const char* key, const std::string& value)
+{
+    if (!value.empty())
+        chat[key] = value;
+}
+
+void add_agent_flags(CLI::App* cmd, media::llm::agent::cliopt::AgentCliOptions& opt)
+{
+    cmd->add_option("-p,--prompt", opt.prompt, "User prompt");
+    cmd->add_option("--preset", opt.preset, "Chat settings preset name or id");
+    cmd->add_option("--runner", opt.runner, "native | claude-code | codex");
+    cmd->add_option("--router", opt.router, "Provider router");
+    cmd->add_option("--model", opt.model, "Model id");
+    cmd->add_option("--api-key", opt.api_key, "API key override");
+    cmd->add_option("--base-url", opt.base_url, "OpenAI-compatible base URL");
+    cmd->add_option("--timeout-ms", opt.timeout_ms, "HTTP timeout per round");
+    cmd->add_option("--max-iter", opt.max_iterations, "Tool-call iteration cap");
+    cmd->add_option("--type", opt.api_mode, "completion | responses | realtime");
+    cmd->add_flag("--no-tools", opt.no_tools, "Text turn only");
+    cmd->add_flag("--no-mcp", opt.no_mcp);
+    cmd->add_flag("--no-skills", opt.no_skills);
+    cmd->add_flag("--skills", opt.skills);
+    cmd->add_flag("--planner", opt.planner);
+    cmd->add_flag("--no-planner", opt.no_planner);
+    cmd->add_option("--session-id", opt.session_id);
+    cmd->add_option("--include", opt.include_paths)->expected(-1);
 }
 
 } // namespace
 
-int main(int argc, char** argv) {
-    CLI::App app{"pm-commons"};
+int main(int argc, char** argv)
+{
+    CLI::App app{"pm-llm"};
     app.require_subcommand(1);
-    Args opt;
+    std::string config_flag;
+    app.add_option("--config-dir", config_flag,
+        "Tanit config directory. Default: %APPDATA%/<vendor>/<config-slug>, or PM_LLM_CONFIG_DIR.");
 
-    auto* str = app.add_subcommand("string", "UTF-8 string primitives");
-    str->require_subcommand(1);
-    auto* lower = str->add_subcommand("lower", "ASCII lower-case");
-    lower->add_option("text", opt.text)->required();
-    lower->callback([&] { emit_ok({{"value", pm::commons::str::lower_ascii(opt.text)}}); });
+    auto* settings = app.add_subcommand("settings", "Read the encrypted settings profile");
+    settings->require_subcommand(1);
+    auto* show = settings->add_subcommand("show", "Print the chat section and preset names");
 
-    auto* trim = str->add_subcommand("trim", "Trim ASCII whitespace");
-    trim->add_option("text", opt.text)->required();
-    trim->callback([&] { emit_ok({{"value", pm::commons::str::trim(opt.text)}}); });
+    media::llm::agent::cliopt::AgentCliOptions opt;
+    auto* agent = app.add_subcommand("agent",
+        "Resolve llm-agent flags against the Tanit settings profile");
+    add_agent_flags(agent, opt);
 
-    auto* leaf = str->add_subcommand("leaf", "Last path component");
-    leaf->add_option("text", opt.text)->required();
-    leaf->callback([&] { emit_ok({{"value", pm::commons::str::path_leaf(opt.text)}}); });
+    auto finish_profile = [&](bool with_agent) {
+        const fs::path config_dir = resolve_config_dir(config_flag);
+        if (config_dir.empty())
+            emit_err("config directory is empty");
+        pm::commons::host::set_config_dir([config_dir] { return config_dir; });
+        pm::commons::host::set_policy_registry_root(std::wstring(pm::brand::k_reg_policy_root_w));
+        std::string source;
+        std::string err;
+        nlohmann::json root;
+        try {
+            root = load_profile(config_dir, source, err);
+        } catch (const std::exception& ex) {
+            emit_err(ex.what());
+        }
+        if (!err.empty() || !root.is_object())
+            emit_err(err.empty() ? "settings profile is not a JSON object" : err);
 
-    auto* ext = str->add_subcommand("ext", "Lower-case extension");
-    ext->add_option("text", opt.text)->required();
-    ext->callback([&] { emit_ok({{"value", pm::commons::str::path_ext_lower(opt.text)}}); });
-
-    auto* match = str->add_subcommand("match", "Fuzzy query coverage");
-    match->add_option("--hay", opt.hay)->required();
-    match->add_option("--query", opt.query)->required();
-    match->callback([&] {
-        emit_ok({
-            {"score", pm::commons::str::match_score(opt.hay, opt.query)},
-            {"matched", pm::commons::str::matches_query(opt.hay, opt.query)},
-        });
-    });
-
-    auto* subst = str->add_subcommand("subst", "Substitute ${name} tokens");
-    subst->add_option("text", opt.text)->required();
-    subst->add_option("--set", opt.sets);
-    subst->callback([&] {
-        const auto resolved = pm::commons::str::substitute_variables(opt.text, [&](std::string_view key) {
-            for (const auto& item : opt.sets) {
-                const auto eq = item.find('=');
-                if (eq == std::string::npos)
+        const nlohmann::json* preset = nullptr;
+        if (with_agent) {
+            preset = find_preset(root, opt.preset);
+            if (!opt.preset.empty() && !preset)
+                emit_err("chat preset not found: " + opt.preset);
+        }
+        nlohmann::json chat = chat_from(root, preset);
+        if (with_agent) {
+            overlay_string(chat, "router", opt.router);
+            overlay_string(chat, "model", opt.model);
+            overlay_string(chat, "base_url", opt.base_url);
+            if (!opt.api_key.empty())
+                chat["api_key"] = opt.api_key;
+            if (opt.timeout_ms > 0)
+                chat["timeout_ms"] = opt.timeout_ms;
+            if (opt.max_iterations > 0)
+                chat["max_iterations"] = opt.max_iterations;
+        }
+        redact(chat);
+        nlohmann::json presets = nlohmann::json::array();
+        if (const auto* list = preset_list(root)) {
+            for (const auto& item : *list) {
+                if (!item.is_object())
                     continue;
-                if (item.substr(0, eq) == key)
-                    return std::optional<std::string>(item.substr(eq + 1));
+                presets.push_back({
+                    {"id", item.value("id", std::string{})},
+                    {"name", item.value("name", std::string{})},
+                    {"runner", item.value("runner", std::string{"native"})},
+                });
             }
-            return std::optional<std::string>{};
-        });
-        emit_ok({{"value", resolved}});
-    });
-
-    auto* args = str->add_subcommand("args", "Expand ${CURRENT_SELECTION}");
-    args->add_option("--arg", opt.args);
-    args->add_option("--select", opt.select);
-    args->callback([&] {
-        emit_ok({{"args", pm::commons::str::normalize_command_args(opt.args, opt.select)}});
-    });
-
-    auto* uuid = app.add_subcommand("uuid", "64-bit and 32-bit identifiers");
-    uuid->require_subcommand(1);
-    auto* next = uuid->add_subcommand("next", "Sequential values");
-    next->add_option("--seed", opt.seed);
-    next->add_option("--count", opt.count);
-    next->callback([&] {
-        pm::commons::uuid::Generator gen;
-        gen.reset_sequential(opt.seed);
-        nlohmann::json values = nlohmann::json::array();
-        for (int i = 0; i < opt.count; ++i)
-            values.push_back(gen.sequential());
-        emit_ok({{"values", values}});
-    });
-    auto* parse_uuid = uuid->add_subcommand("parse", "Parse a hex or standard UUID");
-    parse_uuid->add_option("text", opt.text)->required();
-    parse_uuid->callback([&] {
-        if (opt.text.find('-') != std::string::npos) {
-            const auto id = pm::commons::uuid::Uuid64::from_standard_string(opt.text, true);
-            emit_ok({{"high", id.high}, {"low", id.low}});
         }
-        emit_ok({{"value", pm::commons::uuid::Generator::from_hex(opt.text)}});
-    });
-    auto* format = uuid->add_subcommand("format", "Format a Uuid64");
-    format->add_option("--high", opt.high)->required();
-    format->add_option("--low", opt.low)->required();
-    format->callback([&] {
-        pm::commons::uuid::Uuid64 id(opt.high, opt.low);
-        emit_ok({{"text", id.to_standard_string()}});
-    });
-
-    auto* path = app.add_subcommand("path", "Path policy");
-    path->require_subcommand(1);
-    auto add_text = [&](CLI::App* cmd) {
-        cmd->add_option("text", opt.text)->required();
-        cmd->add_flag("--hex", opt.hex, "Text is hex-encoded UTF-8");
+        nlohmann::json keys = nlohmann::json::array();
+        nlohmann::json outline = nlohmann::json::object();
+        for (auto it = root.begin(); it != root.end(); ++it) {
+            keys.push_back(it.key());
+            if (it.value().is_object()) {
+                nlohmann::json children = nlohmann::json::array();
+                for (auto child = it.value().begin(); child != it.value().end(); ++child)
+                    children.push_back(child.key());
+                outline[it.key()] = std::move(children);
+            } else if (it.value().is_array()) {
+                outline[it.key()] = it.value().size();
+            } else {
+                outline[it.key()] = it.value().type_name();
+            }
+        }
+        nlohmann::json body = {
+            {"ok", true},
+            {"source", source},
+            {"config_dir", config_dir.string()},
+            {"keys", keys},
+            {"outline", outline},
+            {"chat", chat},
+            {"presets", presets},
+        };
+        if (with_agent) {
+            body["agent"] = {
+                {"prompt", opt.prompt},
+                {"preset", opt.preset},
+                {"runner", opt.runner},
+                {"no_tools", opt.no_tools},
+                {"session_id", opt.session_id},
+                {"include", opt.include_paths},
+            };
+            body["run"] = "resolve";
+        }
+        emit(body, 0);
     };
-    auto* sanitize = path->add_subcommand("sanitize", "VFS subpath");
-    add_text(sanitize);
-    sanitize->callback([&] {
-        std::string text;
-        if (!take_text(opt, text))
-            emit_err("EINVAL", "invalid hex");
-        std::string err;
-        const std::string value = media::path::sanitize_subpath(text, err);
-        if (!err.empty())
-            emit_path_err(err);
-        emit_ok({{"value", value}});
-    });
-    auto* write_path = path->add_subcommand("write", "Write-path components");
-    add_text(write_path);
-    write_path->callback([&] {
-        std::string text;
-        if (!take_text(opt, text))
-            emit_err("EINVAL", "invalid hex");
-        std::string err;
-        emit_ok({{"value", media::path::sanitize_write_path(text, err, false)}});
-    });
-    auto* filename = path->add_subcommand("filename", "One filesystem component");
-    add_text(filename);
-    filename->add_option("--replacement", opt.replacement, "Replacement for removed characters");
-    filename->callback([&] {
-        std::string text;
-        if (!take_text(opt, text))
-            emit_err("EINVAL", "invalid hex");
-        emit_ok({{"value", media::path::sanitize_filename(text, opt.replacement)}});
-    });
-    auto* normalize = path->add_subcommand("normalize", "Generic UTF-8 path");
-    add_text(normalize);
-    normalize->add_flag("--force", opt.force);
-    normalize->callback([&] {
-        std::string text;
-        if (!take_text(opt, text))
-            emit_err("EINVAL", "invalid hex");
-        emit_ok({{"value", media::path::normalize_local_path(text, opt.force)}});
-    });
-    auto* safe = path->add_subcommand("safe", "Safe path component");
-    add_text(safe);
-    safe->callback([&] {
-        std::string text;
-        if (!take_text(opt, text))
-            emit_err("EINVAL", "invalid hex");
-        emit_ok({{"safe", media::path::is_safe_path_component(text)}});
-    });
-    auto* selection = path->add_subcommand("selection", "User path to open");
-    add_text(selection);
-    selection->callback([&] {
-        std::string text;
-        if (!take_text(opt, text))
-            emit_err("EINVAL", "invalid hex");
-        std::string err;
-        if (!media::path::validate_path_spec_for_input_selection(text, err))
-            emit_path_err(err);
-        emit_ok({{"accepted", true}});
-    });
 
-    auto* uri = app.add_subcommand("uri", "URI parse and host policy");
-    uri->require_subcommand(1);
-    auto* parse_uri = uri->add_subcommand("parse", "Parse a URI");
-    parse_uri->add_option("text", opt.text)->required();
-    parse_uri->add_flag("--lenient", opt.lenient);
-    parse_uri->add_flag("--reject-userinfo", opt.reject_userinfo);
-    parse_uri->callback([&] {
-        pm::commons::uri::ParseOptions options;
-        options.reject_userinfo = opt.reject_userinfo;
-        auto parsed = opt.lenient
-            ? pm::commons::uri::parse_lenient(opt.text, options)
-            : pm::commons::uri::parse(opt.text, options);
-        if (!parsed)
-            emit_err("EINVAL", "invalid uri");
-        emit_ok({
-            {"scheme", parsed->scheme},
-            {"host", parsed->host},
-            {"port", parsed->port},
-            {"path", parsed->path},
-            {"query", parsed->query},
-            {"fragment", parsed->fragment},
-            {"userinfo", parsed->userinfo},
-        });
-    });
-    auto* decode = uri->add_subcommand("decode", "Percent-decode");
-    decode->add_option("text", opt.text)->required();
-    decode->callback([&] {
-        auto value = pm::commons::uri::percent_decode(opt.text, false);
-        if (!value)
-            emit_err("EINVAL", "invalid percent encoding");
-        emit_ok({{"value", *value}});
-    });
-    auto* priv = uri->add_subcommand("private", "Private or invalid host");
-    priv->add_option("text", opt.text)->required();
-    priv->callback([&] {
-        auto parsed = pm::commons::uri::parse_http(opt.text);
-        if (!parsed)
-            emit_err("EINVAL", "not an http(s) uri");
-        std::string reason;
-        const bool blocked = pm::commons::uri::host_is_private_or_invalid(*parsed, reason);
-        emit_ok({{"private", blocked}, {"reason", reason}});
-    });
-
-    auto* fs = app.add_subcommand("fs", "Ignore rules and magic bytes");
-    fs->require_subcommand(1);
-    auto* fmatch = fs->add_subcommand("match", "Gitignore match");
-    fmatch->add_option("--pattern", opt.pattern)->required();
-    fmatch->add_option("--rel", opt.rel)->required();
-    fmatch->add_flag("--dir", opt.is_dir);
-    fmatch->add_flag("--fold", opt.fold);
-    fmatch->callback([&] {
-        const auto list = pm::commons::fs::parse_gitignore(opt.pattern);
-        const auto* hit = pm::commons::fs::last_match(list, opt.rel, opt.is_dir, opt.fold);
-        if (!hit)
-            emit_ok({{"matched", false}});
-        emit_ok({
-            {"matched", true},
-            {"negative", (hit->flags & pm::commons::fs::PatternNegative) != 0},
-            {"line", hit->line},
-            {"text", hit->text},
-        });
-    });
-    auto* ignore = fs->add_subcommand("ignore", "Walk parent mask files");
-    ignore->add_option("path", opt.text)->required();
-    ignore->add_flag("--dir", opt.is_dir);
-    ignore->add_flag("--fold", opt.fold);
-    ignore->callback([&] {
-        emit_ok({{"ignored", pm::commons::fs::is_ignored(
-            opt.text, opt.is_dir, pm::commons::fs::MaskKind::Gitignore, opt.fold)}});
-    });
-    auto* probe = fs->add_subcommand("probe", "Magic-byte sniff");
-    probe->add_option("path", opt.text)->required();
-    probe->callback([&] {
-        const auto result = pm::commons::fs::probe_file(opt.text);
-        if (!result.ok)
-            emit_err(result.entity == pm::commons::fs::Entity::Missing ? "ENOENT" : "EINVAL", result.error);
-        emit_ok({{"kind", result.kind}, {"mime", result.mime}, {"extension", result.extension}});
-    });
-
-    auto* library = app.add_subcommand("library", "Shared library probe");
-    library->require_subcommand(1);
-    auto* lprobe = library->add_subcommand("probe", "Can the loader see this name");
-    lprobe->add_option("name", opt.name)->required();
-    lprobe->callback([&] {
-        if (opt.name.empty())
-            emit_err("EINVAL", "empty library name");
-        emit_ok({{"found", pm::commons::library::probe(opt.name)}});
-    });
-
-    auto* which = app.add_subcommand("which", "PATH lookup");
-    which->add_option("name", opt.name)->required();
-    which->add_option("--path", opt.paths);
-    which->add_option("--ext", opt.exts);
-    which->add_flag("--file", opt.file);
-    which->callback([&] {
-        pm::commons::process::WhichRequest request;
-        request.name = opt.name;
-        request.directories = opt.paths;
-        request.extensions = opt.exts;
-        request.require_execute = !opt.file;
-        auto hit = pm::commons::process::which(request);
-        if (!hit)
-            emit_err("ENOENT", "not found");
-        emit_ok({{"path", hit->path}, {"kind", hit->kind}});
-    });
-
-    auto* task = app.add_subcommand("task", "Stable task ids");
-    task->require_subcommand(1);
-    auto* tid = task->add_subcommand("id", "Resolve a task name");
-    tid->add_option("name", opt.name)->required();
-    tid->callback([&] {
-        const auto id = pm::commons::task::id_from_name(opt.name);
-        if (id == pm::commons::task::Id::None)
-            emit_err("EINVAL", "unknown task");
-        const auto* def = pm::commons::task::def_for(id);
-        emit_ok({
-            {"id", static_cast<std::uint32_t>(id)},
-            {"name", pm::commons::task::id_name(id)},
-            {"offload", def && def->allows_offload},
-        });
-    });
-    auto* catalog = task->add_subcommand("catalog", "List stable task ids");
-    catalog->callback([&] {
-        nlohmann::json rows = nlohmann::json::array();
-        for (const auto& def : pm::commons::task::catalog()) {
-            rows.push_back({
-                {"id", def.name},
-                {"offload", def.allows_offload},
-            });
-        }
-        emit_ok({{"tasks", rows}});
-    });
-
-    auto* claim = app.add_subcommand("claim", "Scheduler leadership claim");
-    claim->require_subcommand(1);
-    auto* write = claim->add_subcommand("write", "Write claim.json");
-    write->add_option("--dir", opt.dir)->required();
-    write->add_option("--pid", opt.pid)->required();
-    write->add_option("--kind", opt.kind)->required();
-    write->add_option("--priority", opt.priority)->required();
-    write->add_option("--now", opt.now)->required();
-    write->callback([&] {
-        pm::commons::task::Claim row;
-        row.pid = opt.pid;
-        row.kind = opt.kind;
-        row.priority = opt.priority;
-        row.updated_at_ms = opt.now;
-        if (!pm::commons::task::write_claim(opt.dir, row))
-            emit_err("EIO", "could not write claim");
-        emit_ok({{"pid", row.pid}, {"kind", row.kind}, {"priority", row.priority}, {"updatedAt", row.updated_at_ms}});
-    });
-    auto* read = claim->add_subcommand("read", "Read claim.json");
-    read->add_option("--dir", opt.dir)->required();
-    read->callback([&] {
-        pm::commons::task::Claim row;
-        if (!pm::commons::task::read_claim(opt.dir, row))
-            emit_err("ENOENT", "claim missing");
-        emit_ok({{"pid", row.pid}, {"kind", row.kind}, {"priority", row.priority}, {"updatedAt", row.updated_at_ms}});
-    });
-    auto* higher = claim->add_subcommand("higher", "A fresher higher-priority holder");
-    higher->add_option("--dir", opt.dir)->required();
-    higher->add_option("--self-pid", opt.self_pid)->required();
-    higher->add_option("--self-priority", opt.self_priority)->required();
-    higher->add_option("--now", opt.now)->required();
-    higher->add_flag("--alive", opt.alive);
-    higher->callback([&] {
-        const bool live = pm::commons::task::higher_priority_claim_live(
-            opt.dir, opt.self_priority, opt.self_pid, opt.now,
-            opt.alive ? alive_hook : nullptr, nullptr);
-        emit_ok({{"higher", live}});
-    });
-
-    auto* ipc = app.add_subcommand("ipc", "Length-prefixed frame codec");
-    ipc->require_subcommand(1);
-    auto* round = ipc->add_subcommand("roundtrip", "Encode and decode one message");
-    round->add_option("--id", opt.id)->required();
-    round->add_option("--type", opt.type)->required();
-    round->add_option("--payload", opt.payload)->required();
-    round->callback([&] {
-        pm::commons::ipc::Message message{opt.id, opt.type, opt.payload};
-        const auto frame = pm::commons::ipc::encode(message);
-        pm::commons::ipc::Message back;
-        if (!pm::commons::ipc::decode_frame(frame.data(), frame.size(), back))
-            emit_err("EINVAL", "frame did not decode");
-        emit_ok({
-            {"id", back.id},
-            {"type", back.type},
-            {"payload", back.payload},
-            {"bytes", frame.size()},
-        });
-    });
+    show->callback([&] { finish_profile(false); });
+    agent->callback([&] { finish_profile(true); });
 
     try {
         app.parse(argc, argv);
