@@ -1,0 +1,48 @@
+{
+  "ribbon": {
+    "groups": [
+      {
+        "id": "group-home",
+        "items": [
+          {
+            "id": "custom.home",
+            "label": "Home",
+            "description": "Open the home panel",
+            "type": "button",
+            "enabled": true
+          },
+          {
+            "id": "custom.assistant",
+            "label": "Assistant",
+            "description": "activates real-time voice assistant in chat",
+            "type": "button",
+            "enabled": true
+          }
+        ]
+      },
+      {
+        "id": "group-nav",
+        "items": [
+          {
+            "id": "custom.prev",
+            "label": "Previous",
+            "description": "navigates to previous file",
+            "type": "button",
+            "enabled": true
+          },
+          {
+            "id": "custom.next",
+            "label": "Next",
+            "description": "navigates to next file",
+            "type": "button",
+            "enabled": true
+          }
+        ]
+      }
+    ]
+  },
+  "metadata": {
+    "source": "commands-mini fixture",
+    "description": "Small commands.json-shaped object for iterator translation probes"
+  }
+}

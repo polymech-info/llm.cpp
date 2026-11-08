@@ -1,0 +1,216 @@
+{
+  "source": "e2e-video-screen-recorder-5e0cd6/capability-adjudication.in.json",
+  "note": "expectedFit is the deterministic label. The decide payload omits it.",
+  "items": [
+    {
+      "id": "c01",
+      "phrase": "can i video record my screen in windows 10?",
+      "expectedFit": "composed",
+      "outcome": "video-recorder video",
+      "evidence": [
+        "Capture Image / Video (block, score 8)",
+        "Examples (documentation, score 8)",
+        "Picker (block, score 6)",
+        "Video Source (block, score 6)",
+        "Remote Stream (block, score 6)",
+        "Virtual Camera Out (block, score 6)"
+      ]
+    },
+    {
+      "id": "c02",
+      "phrase": "does windows 10 have a video screen recorder?",
+      "expectedFit": "composed",
+      "outcome": "video-recorder video",
+      "evidence": [
+        "Capture Image / Video (block, score 8)",
+        "Examples (documentation, score 8)",
+        "Picker (block, score 6)",
+        "Video Source (block, score 6)",
+        "Remote Stream (block, score 6)",
+        "Virtual Camera Out (block, score 6)"
+      ]
+    },
+    {
+      "id": "c03",
+      "phrase": "does windows have a built-in video recorder?",
+      "expectedFit": "composed",
+      "outcome": "video-recorder video",
+      "evidence": [
+        "Capture Image / Video (block, score 6)",
+        "Virtual Camera Out (block, score 6)",
+        "Examples (documentation, score 6)",
+        "Video Capture (command, score 6)",
+        "Record Audio (block, score 4)",
+        "Picker (block, score 4)"
+      ]
+    },
+    {
+      "id": "c04",
+      "phrase": "how can i record my screen video for free?",
+      "expectedFit": "composed",
+      "outcome": "video-recorder video",
+      "evidence": [
+        "Capture Image / Video (block, score 6)",
+        "Examples (documentation, score 6)",
+        "Video Capture (command, score 6)",
+        "Picker (block, score 4)",
+        "Video Source (block, score 4)",
+        "Remote Stream (block, score 4)"
+      ]
+    },
+    {
+      "id": "c05",
+      "phrase": "how do i record a video in windows 10?",
+      "expectedFit": "composed",
+      "outcome": "video-recorder video",
+      "evidence": [
+        "Capture Image / Video (block, score 6)",
+        "Virtual Camera Out (block, score 6)",
+        "Examples (documentation, score 6)",
+        "Video Capture (command, score 6)",
+        "Record Audio (block, score 4)",
+        "Picker (block, score 4)"
+      ]
+    },
+    {
+      "id": "c06",
+      "phrase": "how do i record a video of my own screen?",
+      "expectedFit": "composed",
+      "outcome": "video-recorder video",
+      "evidence": [
+        "Capture Image / Video (block, score 6)",
+        "Examples (documentation, score 6)",
+        "Video Capture (command, score 6)",
+        "Picker (block, score 4)",
+        "Video Source (block, score 4)",
+        "Remote Stream (block, score 4)"
+      ]
+    },
+    {
+      "id": "c07",
+      "phrase": "how do i record a video of my screen?",
+      "expectedFit": "composed",
+      "outcome": "video-recorder video",
+      "evidence": [
+        "Capture Image / Video (block, score 6)",
+        "Examples (documentation, score 6)",
+        "Video Capture (command, score 6)",
+        "Picker (block, score 4)",
+        "Video Source (block, score 4)",
+        "Remote Stream (block, score 4)"
+      ]
+    },
+    {
+      "id": "c08",
+      "phrase": "is there a webcam with a beauty filter?",
+      "expectedFit": "editorial",
+      "outcome": "is there a webcam with a beauty filter?",
+      "evidence": [
+        "Audio Capture / TTS / STT (command, score 2)",
+        "Resize (command, score 2)",
+        "App Inspect Find (block, score 2)",
+        "Filter Audio (block, score 2)",
+        "Record Audio (block, score 2)",
+        "Screenshot (block, score 2)"
+      ]
+    },
+    {
+      "id": "c09",
+      "phrase": "what is the best free recorder?",
+      "expectedFit": "editorial",
+      "outcome": "what is the best free recorder?",
+      "evidence": [
+        "Audio Capture / TTS / STT (command, score 2)",
+        "Video Capture (command, score 2)",
+        "Filter Audio (block, score 2)",
+        "Record Audio (block, score 2)",
+        "Start Recording (block, score 2)",
+        "Stop Recording (block, score 2)"
+      ]
+    },
+    {
+      "id": "c10",
+      "phrase": "what is the best free video screen recorder?",
+      "expectedFit": "composed",
+      "outcome": "video-recorder video",
+      "evidence": [
+        "Capture Image / Video (block, score 6)",
+        "Examples (documentation, score 6)",
+        "Video Capture (command, score 6)",
+        "Picker (block, score 4)",
+        "Video Source (block, score 4)",
+        "Remote Stream (block, score 4)"
+      ]
+    },
+    {
+      "id": "c11",
+      "phrase": "which camera has a beauty filter?",
+      "expectedFit": "editorial",
+      "outcome": "which camera has a beauty filter?",
+      "evidence": [
+        "Audio Capture / TTS / STT (command, score 2)",
+        "App Inspect Find (block, score 2)",
+        "Filter Audio (block, score 2)",
+        "Record Audio (block, score 2)",
+        "Else (block, score 2)",
+        "Else If (block, score 2)"
+      ]
+    },
+    {
+      "id": "c12",
+      "phrase": "which cameras have a beauty filter?",
+      "expectedFit": "editorial",
+      "outcome": "which cameras have a beauty filter?",
+      "evidence": [
+        "Audio Capture / TTS / STT (command, score 2)",
+        "App Inspect Find (block, score 2)",
+        "Filter Audio (block, score 2)",
+        "Record Audio (block, score 2)",
+        "Screenshot (block, score 2)",
+        "Iterator (block, score 2)"
+      ]
+    },
+    {
+      "id": "c13",
+      "phrase": "which webcam has the best beauty filter?",
+      "expectedFit": "editorial",
+      "outcome": "which webcam has the best beauty filter?",
+      "evidence": [
+        "Audio Capture / TTS / STT (command, score 2)",
+        "App Inspect Find (block, score 2)",
+        "Filter Audio (block, score 2)",
+        "Record Audio (block, score 2)",
+        "Else (block, score 2)",
+        "Else If (block, score 2)"
+      ]
+    },
+    {
+      "id": "c14",
+      "phrase": "do webcams have beauty filters?",
+      "expectedFit": "editorial",
+      "outcome": "do webcams have beauty filters?",
+      "evidence": [
+        "Audio Capture / TTS / STT (command, score 2)",
+        "App Inspect Find (block, score 2)",
+        "Filter Audio (block, score 2)",
+        "Record Audio (block, score 2)",
+        "Screenshot (block, score 2)",
+        "Iterator (block, score 2)"
+      ]
+    },
+    {
+      "id": "c15",
+      "phrase": "video screen recorder free",
+      "expectedFit": "composed",
+      "outcome": "video-recorder video",
+      "evidence": [
+        "Capture Image / Video (block, score 6)",
+        "Examples (documentation, score 6)",
+        "Video Capture (command, score 6)",
+        "Picker (block, score 4)",
+        "Video Source (block, score 4)",
+        "Remote Stream (block, score 4)"
+      ]
+    }
+  ]
+}

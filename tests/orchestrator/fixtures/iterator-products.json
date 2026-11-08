@@ -1,0 +1,13 @@
+{
+  "items": [
+    { "id": "1", "name": "apple", "description": "A fruit", "type": "fresh" },
+    { "id": "2", "name": "banana", "description": "Yellow fruit", "type": "tropical" },
+    { "id": "3", "name": "orange", "description": "Orange fruit", "type": "citrus" }
+  ],
+  "metadata": {
+    "totalCount": 3,
+    "category": "fruits",
+    "description": "Collection of fruits",
+    "type": "food"
+  }
+}

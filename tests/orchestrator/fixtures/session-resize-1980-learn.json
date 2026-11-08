@@ -1,0 +1,46 @@
+{
+  "source": "Observations from tanit session session-10-01-11-24-11. expectedHorizon is the test label and is stripped before the call. session = this chat's artifact. durable = a memory_write fact for later chats. both = needed now and still true later.",
+  "episode": "User: resize all to 1980, see tanit-cli resize. Assistant: resized all 9 JPG images to fit 1980 and saved them in resized_1980.",
+  "observations": [
+    {
+      "id": "output_dir",
+      "text": "This turn wrote 9 jpgs into resized_1980 beside the source screenshots.",
+      "expectedHorizon": "session"
+    },
+    {
+      "id": "worked_command",
+      "text": "The command that wrote the files: tanit-cli resize *.jpg resized_1980 --max-width 1980 --max-height 1980.",
+      "expectedHorizon": "session"
+    },
+    {
+      "id": "source_names",
+      "text": "The source folder held 1.jpg, 10.jpg, 3.jpg, 4.jpg, 5.jpg, 6.jpg, 7.jpg, 8.jpg, 9.jpg.",
+      "expectedHorizon": "session"
+    },
+    {
+      "id": "user_goal",
+      "text": "The user wanted every image in that folder resized to fit 1980 using tanit-cli resize.",
+      "expectedHorizon": "session"
+    },
+    {
+      "id": "pil_missing",
+      "text": "Importing PIL failed in this environment: No module named PIL.",
+      "expectedHorizon": "both"
+    },
+    {
+      "id": "project_folder",
+      "text": "Tanit-chat screenshots live in releases/web-docs/products/tanit-chat/screenshots.",
+      "expectedHorizon": "both"
+    },
+    {
+      "id": "help_flags",
+      "text": "resize --help lists --max-width, --max-height, --format, --fit, and --dst.",
+      "expectedHorizon": "drop"
+    },
+    {
+      "id": "catalog_dump",
+      "text": "info_lookup returned a 28925 character catalog body for the resize command.",
+      "expectedHorizon": "drop"
+    }
+  ]
+}

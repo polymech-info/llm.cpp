@@ -1,0 +1,40 @@
+{
+  "case": "html-gallery-cli",
+  "referenceMarker": "GALLERY_QUAL_REFERENCE_V1",
+  "referencePath": ".qualification/brief-k7.md",
+  "requiredTitle": "Atlas Local Gallery",
+  "agentSmokeOutput": ".qualification/agent-gallery.html",
+  "independentOutput": ".qualification/verified-gallery.html",
+  "followupPrompt": "followup.md",
+  "agentMarkdownOutput": ".qualification/agent-listing.md",
+  "independentMarkdownOutput": ".qualification/verified-listing.md",
+  "requiredFiles": [
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "src/index.ts"
+  ],
+  "requiredTools": [
+    "file_search",
+    "file_read",
+    "write_file",
+    "run"
+  ],
+  "onlyRuntimeDependencies": [
+    "yargs"
+  ],
+  "maxDirectDependencies": 6,
+  "maxIterations": 30,
+  "followupMaxIterations": 18,
+  "timeoutMs": 600000,
+  "probeEntries": [
+    "README & notes.txt",
+    "cover.jpg",
+    "nested",
+    "nested/photo one.png"
+  ],
+  "expectedImageMimeTypes": [
+    "image/jpeg",
+    "image/png"
+  ]
+}
