@@ -5,6 +5,7 @@
 // agent loop is linked here; `agent` resolves the profile and exits.
 
 #include "llm/agent_cli.hpp"
+#include "llm/agent_server_cli.hpp"
 #include "host/services.hpp"
 #include "pm_branding_config.hpp"
 #include "storage/secure_storage.hpp"
@@ -230,6 +231,35 @@ void add_agent_flags(CLI::App* cmd, media::llm::agent::cliopt::AgentCliOptions& 
     cmd->add_option("--include", opt.include_paths)->expected(-1);
 }
 
+void add_serve_flags(CLI::App* cmd, media::llm::agent::cliopt::AgentServerOptions& opt)
+{
+    cmd->add_option("--host", opt.host, "Bind address");
+    cmd->add_option("--port", opt.port, "Bind port");
+    cmd->add_option("--concurrency", opt.concurrency, "Concurrent turns");
+    cmd->add_option("--http-workers", opt.http_workers, "HTTP worker threads (0 = auto)");
+    cmd->add_option("--serve-api-key", opt.serve_api_key, "Bearer token required on /v1");
+    cmd->add_option("--preset", opt.preset, "Chat settings preset name or id");
+    cmd->add_option("--router", opt.router);
+    cmd->add_option("--model", opt.model);
+    cmd->add_option("--api-key", opt.api_key);
+    cmd->add_option("--base-url", opt.base_url);
+    cmd->add_option("--type", opt.api_mode, "completion | responses | realtime");
+    cmd->add_option("--timeout-ms", opt.timeout_ms);
+    cmd->add_option("--max-iter", opt.max_iterations);
+    cmd->add_flag("--no-tools", opt.no_tools);
+    cmd->add_flag("--no-mcp", opt.no_mcp);
+    cmd->add_flag("--no-skills", opt.no_skills);
+    cmd->add_flag("--skills", opt.skills);
+    cmd->add_flag("--planner", opt.planner);
+    cmd->add_flag("--no-planner", opt.no_planner);
+    cmd->add_option("--runner", opt.runner);
+    cmd->add_option("--consent-ui", opt.consent_ui);
+    cmd->add_flag("--fs-jail", opt.fs_jail, "Jail path tools to the request folder");
+    cmd->add_flag("--lan", opt.lan, "Advertise the LAN TLS listener");
+    cmd->add_option("--lan-port", opt.lan_port);
+    cmd->add_option("--lan-name", opt.lan_name);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -248,6 +278,11 @@ int main(int argc, char** argv)
     auto* agent = app.add_subcommand("agent",
         "Resolve llm-agent flags against the Tanit settings profile");
     add_agent_flags(agent, opt);
+
+    media::llm::agent::cliopt::AgentServerOptions serve_opt;
+    auto* serve = app.add_subcommand("serve",
+        "Resolve llm agent --serve flags against the Tanit settings profile");
+    add_serve_flags(serve, serve_opt);
 
     auto finish_profile = [&](bool with_agent) {
         const fs::path config_dir = resolve_config_dir(config_flag);
@@ -335,8 +370,77 @@ int main(int argc, char** argv)
         emit(body, 0);
     };
 
+    auto finish_serve = [&] {
+        const fs::path config_dir = resolve_config_dir(config_flag);
+        if (config_dir.empty())
+            emit_err("config directory is empty");
+        pm::commons::host::set_config_dir([config_dir] { return config_dir; });
+        pm::commons::host::set_policy_registry_root(std::wstring(pm::brand::k_reg_policy_root_w));
+        std::string source;
+        std::string err;
+        nlohmann::json root;
+        try {
+            root = load_profile(config_dir, source, err);
+        } catch (const std::exception& ex) {
+            emit_err(ex.what());
+        }
+        if (!err.empty() || !root.is_object())
+            emit_err(err.empty() ? "settings profile is not a JSON object" : err);
+        const nlohmann::json* preset = find_preset(root, serve_opt.preset);
+        if (!serve_opt.preset.empty() && !preset)
+            emit_err("chat preset not found: " + serve_opt.preset);
+        nlohmann::json chat = chat_from(root, preset);
+        auto take = [&](const char* key, std::string& dest) {
+            if (!dest.empty() || !chat.contains(key) || !chat[key].is_string())
+                return;
+            dest = chat[key].get<std::string>();
+        };
+        take("router", serve_opt.router);
+        take("model", serve_opt.model);
+        take("base_url", serve_opt.base_url);
+        take("api_key", serve_opt.api_key);
+        media::llm::agent::cliopt::apply_server_process_env(serve_opt);
+        if (serve_opt.host.empty())
+            serve_opt.host = "127.0.0.1";
+        if (serve_opt.port <= 0 || serve_opt.port > 65535)
+            emit_err("invalid --port");
+        if (serve_opt.concurrency < 1)
+            serve_opt.concurrency = 1;
+        if (!media::llm::agent::cliopt::is_loopback_host(serve_opt.host) && serve_opt.serve_api_key.empty())
+            emit_err("refusing non-loopback bind without --serve-api-key / TANIT_SERVE_API_KEY");
+        if (serve_opt.lan_port != 0
+            && (serve_opt.lan_port < 1 || serve_opt.lan_port > 65535 || serve_opt.lan_port == serve_opt.port))
+            emit_err("--lan-port must be 1-65535 and differ from --port");
+        nlohmann::json shown = chat;
+        redact(shown);
+        const std::string serve_key = serve_opt.serve_api_key.empty() ? "" : "***";
+        emit({
+            {"ok", true},
+            {"run", "resolve"},
+            {"source", source},
+            {"config_dir", config_dir.string()},
+            {"chat", shown},
+            {"serve", {
+                {"host", serve_opt.host},
+                {"port", serve_opt.port},
+                {"concurrency", serve_opt.concurrency},
+                {"http_workers", media::llm::agent::cliopt::resolved_http_workers(serve_opt)},
+                {"serve_api_key", serve_key},
+                {"preset", serve_opt.preset},
+                {"router", serve_opt.router},
+                {"model", serve_opt.model},
+                {"fs_jail", serve_opt.fs_jail},
+                {"lan", serve_opt.lan},
+                {"lan_port", serve_opt.lan_port},
+                {"no_tools", serve_opt.no_tools},
+                {"consent_ui", serve_opt.consent_ui},
+            }},
+        }, 0);
+    };
+
     show->callback([&] { finish_profile(false); });
     agent->callback([&] { finish_profile(true); });
+    serve->callback(finish_serve);
 
     try {
         app.parse(argc, argv);
