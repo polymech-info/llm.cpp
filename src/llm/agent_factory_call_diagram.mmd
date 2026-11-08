@@ -1,0 +1,100 @@
+```mermaid
+flowchart TD
+  A[Caller\nAgent::run(turn, provider, cb)] --> B[Phase 1\nFeature on_prepare (opts_.features::on_prepare)]
+  B --> C[Request tools schema\nappend_request_tools_schema(prepared.tools)]
+  C --> D{System prompt prepared?}
+  D -- no --> E[Build default system prompt\nbuild_system_prompt(working, prepared.tools)]
+  D -- yes --> F[Use prepared.system_prompt]
+  E --> G[Phase 2\nInitialize security gateway\n(optional) consent delegate]
+  F --> G
+
+  G --> H[Phase 2\nInitialize message history\nmessages=[system?, user]]
+  H --> I[Emit TurnStarted]
+  I --> J[Cancellation predicates\nCtrl+C + turn-local cancel]
+  J --> K[Phase 3\nConfigure LLM backend\n(router: loopback / llama / kbot / responses / realtime)]
+  K --> L[Phase 4\nLLM loop\nfor iter < max_iterations]
+
+  L --> M[Optional pre-API context reduction\n(reduce wire copy only)]
+  M --> N{LLM call router}
+
+  N -- loopback --> O[loopback_client::execute_chat_messages]
+  N -- local llama --> P[llama_client::execute_chat_messages]
+  N -- responses --> Q[LLM responses\n(kbot_client execute_responses[_stream])]
+  N -- realtime --> R[execute_realtime_text (tools disabled)]
+  N -- completion --> S[execute_chat_messages]
+
+  O --> T{resp.tool_calls empty?}
+  P --> T
+  Q --> T
+  R --> T
+  S --> T
+
+  T -- yes --> U[Final text\nres.final_text + assistant message]
+  U --> V[Emit AssistantText + Done]
+  V --> W[Phase 3/4 cleanup\nfeatures::on_finish]
+  T -- no --> X[Append assistant tool-call message]
+
+  X --> Y{parallel_tool_dispatch && tools available}
+  Y -- yes --> Z[Parallel dispatch\nasync for each tool_call]
+  Z --> Z1[Per tool: (MCP? mcp_bridge.call_tool) else path::execute]
+  Z --> Z2[Emit ToolResult in original order\n& append tool messages]
+  Y -- no --> AA[Serial dispatch loop over tool_calls]
+  AA --> AB[Guard: tc.arguments is_object?]
+  AB --> AC{MCP openai function?}
+  AC -- yes --> AD[prepared.mcp_bridge->call_tool]
+  AC -- no --> AE[path::execute(tool_name, args)]
+
+  AD --> AF[ToolResult envelope parsing]
+  AE --> AF
+  AF --> AG[Optional browser injection follow-through checks]
+  AG --> AH[Optional security gateway intercept\nauthorizeWithConsent(before dispatch)]
+  AH --> AI{sec_decision Allow?}
+  AI -- no --> AJ[security_deny_envelope\nemit ToolResult blocked]
+  AI -- yes --> AK[Dispatch allowed tool]
+
+  AJ --> AL[consecutive_sec_denials++\nabort if threshold]
+  AK --> AL[consecutive_sec_denials reset on ok]
+
+  AL --> AM[Emit ToolResult event + mid-turn journal persistence]
+  AM --> X2[Continue loop\nnext LLM round]
+
+  W --> END[Return Result]
+
+  %% Tool-requests inside the loop
+  subgraph RT[Special tool: request_tools]
+    X2 --> BRT{Tool name == "request_tools"}
+    BRT -- yes --> BRT1[handle_request_tools\nvalidate path tools\ngrant progressive tools\nrebuild_progressive_tools]
+    BRT1 --> BRT2[Return ToolResult envelope\n(next_step: Call granted tools)]
+    BRT2 --> X2
+  end
+
+  subgraph PT[Special tool: create_command]
+    X2 --> BCT{Tool name == "create_command"}
+    BCT -- yes --> BCT1[allow_create_command && !duplicate_label?]
+    BCT1 -- no --> BCT2[ToolResult skipped]\n(and tell to call granted tool instead)
+    BCT1 -- yes --> BCT3[Create ribbon/menu entry]
+    BCT3 --> X2
+  end
+
+  %% Security gateway
+  subgraph SEC[Security gateway (Phase 2/4 intercept)]
+    AH --> SEC1[build_agent_tool_request(tool_name,args,is_mcp,session_id,task_id,workspace)]
+    SEC1 --> SEC2[sec_gateway.authorizeWithConsent(sec_req)]
+    SEC2 --> SEC3[session_persist_security_decision + persist grant]
+  end
+
+  %% Features ordering
+  subgraph FEATS[Feature phases (configured in AgentFactory::default_agent())]
+    F1[feature_embed_inference (optional)] --> F2[feature_path_scope]
+    F2 --> F3[feature_planner (optional)]
+    F3 --> F4[feature_tools (build path-tool catalog)]
+    F4 --> F5[feature_mcp (merge mcp.json + bridge)]
+    F5 --> F6[feature_memory]
+    F6 --> F7[feature_tool_checkpoints (optional)]
+    F7 --> F8[feature_memory_recall]
+    F8 --> F9[feature_snapshot]
+    F9 --> F10[feature_skills (optional)]
+    F10 --> F11[feature_system_prompt]
+    F11 --> F12[feature_self_check]
+  end
+```

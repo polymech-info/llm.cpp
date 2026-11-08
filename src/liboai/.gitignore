@@ -1,0 +1,6 @@
+.vs
+[Bb]uild*
+out
+TestApp
+.cache
+/.idea
