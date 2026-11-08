@@ -390,27 +390,10 @@ int main(int argc, char** argv)
         if (!serve_opt.preset.empty() && !preset)
             emit_err("chat preset not found: " + serve_opt.preset);
         nlohmann::json chat = chat_from(root, preset);
-        auto take = [&](const char* key, std::string& dest) {
-            if (!dest.empty() || !chat.contains(key) || !chat[key].is_string())
-                return;
-            dest = chat[key].get<std::string>();
-        };
-        take("router", serve_opt.router);
-        take("model", serve_opt.model);
-        take("base_url", serve_opt.base_url);
-        take("api_key", serve_opt.api_key);
+        media::llm::agent::cliopt::overlay_server_chat(chat, serve_opt);
         media::llm::agent::cliopt::apply_server_process_env(serve_opt);
-        if (serve_opt.host.empty())
-            serve_opt.host = "127.0.0.1";
-        if (serve_opt.port <= 0 || serve_opt.port > 65535)
-            emit_err("invalid --port");
-        if (serve_opt.concurrency < 1)
-            serve_opt.concurrency = 1;
-        if (!media::llm::agent::cliopt::is_loopback_host(serve_opt.host) && serve_opt.serve_api_key.empty())
-            emit_err("refusing non-loopback bind without --serve-api-key / TANIT_SERVE_API_KEY");
-        if (serve_opt.lan_port != 0
-            && (serve_opt.lan_port < 1 || serve_opt.lan_port > 65535 || serve_opt.lan_port == serve_opt.port))
-            emit_err("--lan-port must be 1-65535 and differ from --port");
+        if (const std::string err = media::llm::agent::cliopt::validate_server_options(serve_opt); !err.empty())
+            emit_err(err);
         nlohmann::json shown = chat;
         redact(shown);
         const std::string serve_key = serve_opt.serve_api_key.empty() ? "" : "***";
