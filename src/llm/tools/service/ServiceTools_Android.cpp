@@ -6,6 +6,7 @@
 #include "pm_android_service.hpp"
 #include "fs/path_sanitizer.hpp"
 
+#include "cms/cms_host.hpp"
 #include "cms/pm_cms_ai_gateway.hpp"
 #include "cms/pm_cms_download.hpp"
 #include "cms/pm_cms_list.hpp"
@@ -140,8 +141,14 @@ namespace {
 
 bool open_session(const std::string& profile_dir, pm::cms::CmsSession& session, std::string& err)
 {
+  pm::cms::install_host_hooks();
   media::portable_settings::set_profile_dir_override(profile_dir);
-  return pm::cms::resolve_cms_session("", session, err);
+  if (pm::cms::resolve_cms_session("", session, err))
+    return true;
+  if (err.find("SERVER_URL") == std::string::npos)
+    return false;
+  err.clear();
+  return pm::cms::resolve_cms_session(pm::k_tanit_service_server_base_default_u8, session, err);
 }
 
 } // namespace
