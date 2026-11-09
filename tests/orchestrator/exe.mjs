@@ -14,23 +14,7 @@ export function isPmLlm(exe) {
   return /^pm-llm(\.exe)?$/i.test(basename(String(exe || '')));
 }
 
-/** Tanit argv is `llm agent …`. pm-llm argv is `agent …` or `serve …`. */
+/** pm-llm registers the same `llm agent` tree as tanit-cli, including `--serve`. */
 export function prepareCliArgs(exe, args) {
-  if (!isPmLlm(exe))
-    return args;
-  const out = [];
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === 'llm' && args[i + 1] === 'agent') {
-      const rest = args.slice(i + 2);
-      const serveAt = rest.indexOf('--serve');
-      if (serveAt >= 0) {
-        out.push('serve', ...rest.filter((arg) => arg !== '--serve'));
-      } else {
-        out.push('agent', ...rest);
-      }
-      break;
-    }
-    out.push(args[i]);
-  }
-  return out;
+  return args;
 }
