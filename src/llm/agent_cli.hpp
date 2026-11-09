@@ -17,7 +17,6 @@ struct AgentCliOptions {
     std::vector<std::string> embed_paths;
     std::string preset;
     std::string runner;
-    std::string save_preset;
     std::string router;
     std::string model;
     std::string api_key;

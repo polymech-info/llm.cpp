@@ -349,7 +349,7 @@ void append_presets(std::ostream& os)
     std::string err;
     (void)runtime_settings::load_chat_provider_presets(presets, err);
     os << "## Presets\n";
-    os << "Use " << media::llm::agent::child_launch_canonical_example() << " for narrow child agents; save current args with `--save-preset <name>`.\n";
+    os << "Use " << media::llm::agent::child_launch_canonical_example() << " for narrow child agents.\n";
     if (!err.empty())
         os << "- warning: " << shorten(err, 100) << "\n";
     if (presets.empty()) {

@@ -268,7 +268,7 @@ int pm_image_cmd_llm_agent(CLI::App& app, PmImageCliState& st,
     // read from resolved_default_chat_settings() which checks this override first.
     media::llm::ChatSettingsOverrideGuard tool_settings_guard(launch_resolved.chat_settings);
 
-    if (st.ag_prompt.empty() && st.ag_save_preset.empty() && !cli_tty::stdin_is_tty()) {
+    if (st.ag_prompt.empty() && !cli_tty::stdin_is_tty()) {
         std::ostringstream buf;
         buf << std::cin.rdbuf();
         st.ag_prompt = buf.str();
@@ -303,7 +303,7 @@ int pm_image_cmd_llm_agent(CLI::App& app, PmImageCliState& st,
     // Live voice session: `--realtime` with no prompt-run intent starts a
     // speech-to-speech session (mic+speaker) instead of a one-shot text turn.
     // A --prompt is optional here (injected as a spoken-turn seed).
-    if (st.ag_realtime && !st.ag_dry && st.ag_save_preset.empty()) {
+    if (st.ag_realtime && !st.ag_dry) {
 #if defined(PM_CLI_CONSENT_UI) && PM_CLI_CONSENT_UI
         // A live voice session runs tools (e.g. app_screenshot) via the realtime
         // bridge, which triggers the security gateway's consent path. The normal
@@ -364,8 +364,7 @@ int pm_image_cmd_llm_agent(CLI::App& app, PmImageCliState& st,
 #endif // FEATURE_STT
 
     // Normal (text) mode — prompt can come from --prompt or piped stdin.
-    const bool prompt_for_run = !st.ag_prompt.empty();
-    if (st.ag_prompt.empty() && st.ag_save_preset.empty()) {
+    if (st.ag_prompt.empty()) {
         std::cerr << "llm agent: --prompt is required (or pipe prompt via stdin, or use --mic for voice input)\n";
         return 1;
     }
@@ -439,82 +438,6 @@ int pm_image_cmd_llm_agent(CLI::App& app, PmImageCliState& st,
     // Base: load Chat Provider Settings from the app config store (Windows only).
     // CLI args overlay on top of whatever is saved there.
     media::llm::agent::ProviderSettings prov = launch_resolved.provider;
-
-    if (!st.ag_save_preset.empty()) {
-        media::runtime_settings::ChatProviderPreset preset_to_save;
-        preset_to_save.name = st.ag_save_preset;
-        if (launch_resolved.has_preset) {
-            std::string save_key = st.ag_save_preset;
-            save_key = media::strutil::lower_ascii(std::move(save_key));
-            std::string selected_name = launch_resolved.selected_preset.name;
-            std::string selected_id = launch_resolved.selected_preset.id;
-            selected_name = media::strutil::lower_ascii(std::move(selected_name));
-            selected_id = media::strutil::lower_ascii(std::move(selected_id));
-            if (save_key == selected_name || save_key == selected_id)
-                preset_to_save.id = launch_resolved.selected_preset.id;
-        }
-        preset_to_save.chat = launch_resolved.chat_settings;
-        preset_to_save.chat.router = prov.router;
-        preset_to_save.chat.model = prov.model;
-        preset_to_save.chat.timeout_ms = prov.timeout_ms;
-        preset_to_save.chat.max_iterations = prov.max_iterations;
-        preset_to_save.chat.planner_enabled = turn.planner_enabled;
-        preset_to_save.chat.api_mode = st.ag_api_mode;
-        preset_to_save.runner = launch_resolved.effective_runner;
-        preset_to_save.load_agent_md = turn.load_agent_md;
-        if (launch_resolved.has_preset) {
-            preset_to_save.add_tanit_mcp_server =
-                launch_resolved.selected_preset.add_tanit_mcp_server;
-            preset_to_save.consent_ui = launch_resolved.selected_preset.consent_ui;
-        }
-        if (!st.ag_consent_ui.empty()) {
-            preset_to_save.consent_ui =
-                media::settings_schema::normalize_chat_preset_consent_ui(st.ag_consent_ui);
-        }
-        preset_to_save.has_tools = true;
-        if (turn.tool_policy_override_set) {
-            preset_to_save.tools.disabled_path_tools = turn.disabled_path_tools;
-            preset_to_save.tools.mcp_tools_enabled = turn.mcp_tools_enabled;
-            preset_to_save.tools.disabled_mcp_servers = turn.disabled_mcp_servers;
-        } else {
-            preset_to_save.tools.disabled_path_tools = turn.disabled_path_tools;
-            preset_to_save.tools.mcp_tools_enabled = turn.mcp_tools_enabled;
-            preset_to_save.tools.disabled_mcp_servers = turn.disabled_mcp_servers;
-            std::string policy_err;
-            media::runtime_settings::apply_global_tool_policy_to_values(
-                preset_to_save.tools.disabled_path_tools,
-                preset_to_save.tools.mcp_tools_enabled,
-                preset_to_save.tools.disabled_mcp_servers,
-                policy_err);
-            if (!policy_err.empty())
-                logger::warn(std::string("llm agent: saving preset tool policy: ") + policy_err);
-        }
-
-        preset_to_save.has_skills = true;
-        if (turn.skill_policy_override_set) {
-            preset_to_save.skills.enabled = turn.skills_enabled;
-            preset_to_save.skills.roaming_enabled = turn.skills_roaming_enabled;
-            preset_to_save.skills.workspace_enabled = turn.skills_workspace_enabled;
-            preset_to_save.skills.pinned = turn.pinned_skills;
-            preset_to_save.skills.disabled = turn.disabled_skills;
-        } else {
-            std::string skill_err;
-            (void)media::runtime_settings::load_agent_skills_settings(preset_to_save.skills, skill_err);
-            if (!skill_err.empty())
-                logger::warn(std::string("llm agent: saving preset skill policy: ") + skill_err);
-        }
-
-        bool changed = false;
-        std::string save_err;
-        if (!media::runtime_settings::save_chat_provider_preset(std::move(preset_to_save), changed, save_err)) {
-            std::cerr << "llm agent: save preset failed: " << save_err << "\n";
-            return 1;
-        }
-        std::cerr << "llm agent: preset `" << st.ag_save_preset << "` "
-                  << (changed ? "saved" : "unchanged") << "\n";
-        if (!prompt_for_run)
-            return 0;
-    }
 
     auto agent_log_utc_now = []() -> std::string {
         std::time_t t = std::time(nullptr);

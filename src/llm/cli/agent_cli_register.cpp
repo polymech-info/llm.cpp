@@ -269,10 +269,6 @@ void pm_image_register_llm(CLI::App& app, PmImageCliState& s) {
         "Agent backend: native (default) | claude-code | codex. "
         "Also reads PM_LLM_AGENT_RUNNER when unset.")
         ->group("Provider");
-    s.llm_agent_cmd->add_option("--save-preset", s.ag_save_preset,
-        "Save the resolved chat/tool/MCP/skill settings as a preset name. With --preset, clones/updates from that base; "
-        "without --prompt, saves and exits.")
-        ->group("Provider");
     s.llm_agent_cmd->add_option("--router", s.ag_router,
         "LLM router (llama|openrouter|openai|deepseek|gemini|ollama|fireworks|xai|huggingface). "
         "Default: from Chat Provider Settings in app.")
@@ -518,8 +514,7 @@ void pm_image_register_llm(CLI::App& app, PmImageCliState& s) {
         "Start a live speech-to-speech voice session over the WebSocket /v1/realtime "
         "endpoint (mic + speaker; the full agent is exposed as the run_pm_agent tool). "
         "No --prompt is required; if given it seeds the conversation. Runs until Ctrl+C "
-        "or `--realtime-stop`. Best with router=openai / a realtime model. "
-        "(With --save-preset, falls back to the text PoC `--type realtime` path.)")
+        "or `--realtime-stop`. Best with router=openai / a realtime model.")
         ->group("API Mode");
     s.llm_agent_cmd->add_flag(
         "--realtime-stop", s.ag_realtime_stop,

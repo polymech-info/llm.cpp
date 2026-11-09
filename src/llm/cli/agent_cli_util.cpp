@@ -303,7 +303,6 @@ media::llm::agent::cliopt::AgentCliOptions agent_cli_options_from(const PmImageC
     o.embed_paths = st.ag_embed_paths;
     o.preset = st.ag_preset;
     o.runner = st.ag_runner;
-    o.save_preset = st.ag_save_preset;
     o.router = st.ag_router;
     o.model = st.ag_model;
     o.api_key = st.ag_api_key;
