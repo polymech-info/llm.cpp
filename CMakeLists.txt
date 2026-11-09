@@ -8,8 +8,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 # One static library for the OpenAI client and the kbot wrapper.
-# Agent translation units stay on the host lists (pm-media / pm-llm-host /
+# Agent translation units stay on the host targets (pm-media / pm-llm-host /
 # android / security) so the chat-plugin export split still holds.
+# The file list is packages/llm.cpp/cmake/host-sources.cmake.
 # The target keeps the name kbot: the host already links that.
 add_library(kbot STATIC
   src/kbot/kbot.cpp

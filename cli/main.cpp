@@ -77,8 +77,6 @@ int prepare_profile(CLI::App& app, PmImageCliState& st)
 }
 
 #if defined(_WIN32)
-// Same as tanit-cli. A console still on the OEM code page shows UTF-8 as
-// mojibake ("ΓÇÖ" for U+2019, "ΓÇö" for an em dash). Pipes and files stay untouched.
 void try_set_console_utf8()
 {
     const HANDLE hout = GetStdHandle(STD_OUTPUT_HANDLE);
