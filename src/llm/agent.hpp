@@ -412,6 +412,14 @@ PM_CHAT_API Result run_turn(const Turn& turn,
                               const ProviderSettings& provider,
                               EventCallback on_event = nullptr);
 
+/// One text turn that rewrites a document page for speech. No tools, planner,
+/// skills, or memory. The original page stays with the caller; this returns
+/// only the spoken text. max_iterations on the provider is forced to 0.
+Result run_spoken_page(const std::string& page_text,
+                       const std::string& prompt,
+                       const std::string& language,
+                       const ProviderSettings& provider);
+
 /// Process-once, non-blocking host I/O warmup (prompt decrypt, MCP tools
 /// disk/stale cache, skills listing, embed GGUF). Call from chat HWND create
 /// so the first turn does not pay that work on the silent prepare path.
