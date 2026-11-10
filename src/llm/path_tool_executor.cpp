@@ -305,6 +305,7 @@ ExecuteResult execute_impl(const std::string& name_in, const nlohmann::json& arg
 
         // Audio
         if (name == "speak")               return log_done(do_speak(arguments));
+        if (name == "read")                return log_done(do_read(arguments));
         if (name == "play_file")           return log_done(do_play_file(arguments));
         if (name == "suspend_voice")       return log_done(do_suspend_voice(arguments));
         if (name == "audio_transcribe")    return log_done(do_audio_transcribe(arguments));

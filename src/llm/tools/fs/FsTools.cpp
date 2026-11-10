@@ -36,8 +36,15 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cwctype>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 #include <cstdint>
 #include <fstream>
 #include <limits>
@@ -492,7 +499,17 @@ bool read_file_bytes(const fs::path& p, std::string& out, std::string& err) {
 }
 
 bool atomic_write_utf8(const fs::path& path, const std::string& data, std::string& err) {
-    const fs::path tmp = path.native() + fs::path(".tmp~").native();
+    static std::atomic<unsigned> seq{0};
+    const unsigned n = seq.fetch_add(1, std::memory_order_relaxed);
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+#ifdef _WIN32
+    const int pid = _getpid();
+#else
+    const int pid = static_cast<int>(::getpid());
+#endif
+    const std::string suffix = ".tmp-" + std::to_string(pid) + "-"
+        + std::to_string(stamp) + "-" + std::to_string(n);
+    const fs::path tmp = path.native() + fs::path(suffix).native();
     {
         std::ofstream f(tmp, std::ios::out | std::ios::binary | std::ios::trunc);
         if (!f) {
@@ -1308,12 +1325,16 @@ ExecuteResult do_write_file(const nlohmann::json& args) {
     if (stale_version("write_file", before, args, stale))
         return stale;
 
-    const std::ios::openmode mode =
-        (append ? (std::ios::app) : (std::ios::trunc)) | std::ios::binary;
-    std::ofstream ofs(p, std::ios::out | mode);
-    if (!ofs) return fatal("write_file: cannot open for writing: " + out_abs);
-    ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
-    if (!ofs.good()) return fatal("write_file: write failed: " + out_abs);
+    if (!append) {
+        std::string write_err;
+        if (!atomic_write_utf8(p, content, write_err))
+            return fatal("write_file: " + write_err);
+    } else {
+        std::ofstream ofs(p, std::ios::out | std::ios::app | std::ios::binary);
+        if (!ofs) return fatal("write_file: cannot open for writing: " + out_abs);
+        ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
+        if (!ofs.good()) return fatal("write_file: write failed: " + out_abs);
+    }
 
     const std::string after = append ? (before + content) : content;
 

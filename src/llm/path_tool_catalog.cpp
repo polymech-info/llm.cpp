@@ -330,6 +330,7 @@ std::vector<ToolDef> tool_catalog() {
         make_file_str_replace(),
         make_file_delete(),
         make_speak(),
+        make_read(),
         make_play_file(),
         make_suspend_voice(),
 #if defined(FEATURE_STT) && FEATURE_STT

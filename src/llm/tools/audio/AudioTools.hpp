@@ -33,6 +33,7 @@ struct SpeakAudioResult {
 };
 
 ExecuteResult do_speak(const nlohmann::json& args);
+ExecuteResult do_read(const nlohmann::json& args);
 ExecuteResult do_play_file(const nlohmann::json& args);
 SpeakAudioResult do_speak_audio_buffer(const std::string& text,
                                        const std::string& extension = ".mp3",
@@ -44,6 +45,7 @@ ExecuteResult do_audio_transcribe_buffer(const std::vector<unsigned char>& audio
                                          const nlohmann::json& args = nlohmann::json::object());
 
 ToolDef make_speak();
+ToolDef make_read();
 ToolDef make_play_file();
 ToolDef make_audio_transcribe();
 
