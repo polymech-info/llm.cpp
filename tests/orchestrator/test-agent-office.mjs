@@ -12,8 +12,8 @@
  *
  * Flags:
  *   --mode loopback|live
- *   --preset <chat-preset>   (live; default quick)
- *   --only docx,xlsx,pptx,reject,live
+ *   --preset <chat-preset>   (live; omit to use the installed default)
+ *   --only docx,xlsx,pptx,reject,hold,live
  *   --require-live
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -30,6 +30,7 @@ import {
   finalText,
   printAgentHarnessBanner,
   readJson,
+  parseArgValue,
   runAgentRound,
   runHarnessSuites,
   toolCalls,
@@ -41,13 +42,15 @@ import {
 const LOOPBACK_PRESET = 'office-tools-loopback';
 const OFFICE_TOOLS = ['--enable-tools',
   'office_create,office_view,office_get,office_query,office_add,office_set,office_remove,office_move,office_swap,office_batch,office_validate'];
-const SUITE_NAMES = ['docx', 'xlsx', 'pptx', 'reject', 'live'];
+const SUITE_NAMES = ['docx', 'xlsx', 'pptx', 'reject', 'hold', 'live'];
 
 const harness = createAgentHarnessOptions({
   harnessSubdir: 'agent-office',
   loopbackPresetId: LOOPBACK_PRESET,
   displayName: 'agent-office',
 });
+// Live uses the installed default preset. Pass --preset only when one was named.
+if (!parseArgValue('--preset')) harness.preset = '';
 
 function toolEnvelopes(bundlePath, name) {
   const bundle = bundlePath ? readJson(bundlePath) : null;
@@ -63,13 +66,13 @@ function toolEnvelopes(bundlePath, name) {
   return out;
 }
 
-function scripted(ctx, { suite, index, name, calls, timeout }) {
+function scripted(ctx, { suite, index, name, calls, timeout, parallel }) {
   return runAgentRound({
     ...ctx,
     mode: 'loopback',
     sessionId: `${ctx.runId}-${suite}-${index}`,
     prompt: name,
-    extraArgs: [...OFFICE_TOOLS, '--consent-ui', 'auto-allow', '--no-parallel-tools'],
+    extraArgs: [...OFFICE_TOOLS, '--consent-ui', 'auto-allow', ...(parallel ? [] : ['--no-parallel-tools'])],
     script: [
       { tool_calls: calls.map((c, i) => ({ id: `tc_${suite}_${index}_${i}`, ...c })) },
       { text: `done: ${name}` },
@@ -240,6 +243,97 @@ function suiteReject(rep, assert, ctx) {
   rep.endSuite();
 }
 
+function cellValue(sheet, ref) {
+  const cells = Array.isArray(sheet?.cells) ? sheet.cells : [];
+  return cells.find((cell) => cell.ref === ref)?.value;
+}
+
+function suiteHold(rep, assert, ctx) {
+  console.log('\n-- hold --\n');
+  rep.beginSuite('hold');
+  const file = join(ctx.cwd, 'hold.xlsx');
+  const precise = scripted(ctx, {
+    suite: 'hold',
+    index: 1,
+    name: 'keep exact cell text in one run',
+    calls: [
+      { name: 'office_create', arguments: { path: file } },
+      { name: 'office_set', arguments: { path: file, node: 'Sheet1!A1', props: { value: '0010' } } },
+      { name: 'office_set', arguments: { path: file, node: 'Sheet1!B1', props: { value: 'café-Δ' } } },
+      { name: 'office_set', arguments: { path: file, node: 'Sheet1!C1', props: { value: '1.2300' } } },
+      { name: 'office_set', arguments: { path: file, node: 'Sheet1!D1', props: { value: '=A1' } } },
+      { name: 'office_get', arguments: { path: file, node: 'Sheet1!A1' } },
+      { name: 'office_view', arguments: { path: file, mode: 'markdown' } },
+    ],
+  });
+  const got = JSON.stringify(toolResultEnvelope(precise.bundlePath, 'office_get') || {});
+  const viewed = toolResultEnvelope(precise.bundlePath, 'office_view');
+  rep.step('precise', precise.ms, truncateText(JSON.stringify(viewed?.cells), 120));
+  assert(precise.status === 0, `hold: precise run exits 0 (status=${precise.status})`);
+  assert(got.includes('0010') && !got.includes('"value":"10"'), `hold: A1 keeps leading zeros (got ${truncateText(got, 180)})`);
+  assert(cellValue(viewed, 'A1') === '0010', `hold: markdown A1 (got ${cellValue(viewed, 'A1')})`);
+  assert(cellValue(viewed, 'B1') === 'café-Δ', `hold: markdown B1 (got ${cellValue(viewed, 'B1')})`);
+  assert(cellValue(viewed, 'C1') === '1.2300', `hold: markdown C1 (got ${cellValue(viewed, 'C1')})`);
+  assert(cellValue(viewed, 'D1') === '=A1', `hold: formula stays the expression (got ${cellValue(viewed, 'D1')})`);
+
+  const saved = scripted(ctx, {
+    suite: 'hold',
+    index: 2,
+    name: 'read the saved workbook',
+    calls: [{ name: 'office_view', arguments: { path: file, mode: 'markdown' } }],
+  });
+  const disk = toolResultEnvelope(saved.bundlePath, 'office_view');
+  assert(saved.status === 0, `hold: saved read exits 0 (status=${saved.status})`);
+  assert(cellValue(disk, 'A1') === '0010' && cellValue(disk, 'B1') === 'café-Δ' && cellValue(disk, 'C1') === '1.2300' && cellValue(disk, 'D1') === '=A1',
+    `hold: run saved the exact cells (got ${truncateText(JSON.stringify(disk?.cells), 180)})`);
+
+  const parallel = scripted(ctx, {
+    suite: 'hold',
+    index: 3,
+    name: 'parallel writes to different cells',
+    parallel: true,
+    calls: [
+      { name: 'office_set', arguments: { path: file, node: 'Sheet1!E1', props: { value: 'left-cell' } } },
+      { name: 'office_set', arguments: { path: file, node: 'Sheet1!F1', props: { value: 'right-cell' } } },
+    ],
+  });
+  assert(parallel.status === 0, `hold: parallel run exits 0 (status=${parallel.status} stderr=${truncateText(parallel.stderr, 160)})`);
+  const both = scripted(ctx, {
+    suite: 'hold',
+    index: 4,
+    name: 'read parallel cells',
+    calls: [{ name: 'office_view', arguments: { path: file, mode: 'markdown' } }],
+  });
+  const after = toolResultEnvelope(both.bundlePath, 'office_view');
+  assert(cellValue(after, 'E1') === 'left-cell' && cellValue(after, 'F1') === 'right-cell',
+    `hold: both parallel cells survived (got ${truncateText(JSON.stringify(after?.cells), 180)})`);
+  assert(cellValue(after, 'A1') === '0010' && cellValue(after, 'D1') === '=A1', 'hold: parallel writes left the earlier cells');
+
+  const race = scripted(ctx, {
+    suite: 'hold',
+    index: 5,
+    name: 'parallel writes to one cell',
+    parallel: true,
+    calls: [
+      { name: 'office_set', arguments: { path: file, node: 'Sheet1!G1', props: { value: 'alpha' } } },
+      { name: 'office_set', arguments: { path: file, node: 'Sheet1!G1', props: { value: 'beta' } } },
+    ],
+  });
+  assert(race.status === 0, `hold: same-cell race exits 0 (status=${race.status})`);
+  const raced = scripted(ctx, {
+    suite: 'hold',
+    index: 6,
+    name: 'read the raced cell',
+    calls: [{ name: 'office_view', arguments: { path: file, mode: 'markdown' } }],
+  });
+  const winner = cellValue(toolResultEnvelope(raced.bundlePath, 'office_view'), 'G1');
+  const still = toolResultEnvelope(raced.bundlePath, 'office_view');
+  assert(winner === 'alpha' || winner === 'beta', `hold: same-cell write is one whole value (got ${winner})`);
+  assert(cellValue(still, 'E1') === 'left-cell' && cellValue(still, 'F1') === 'right-cell' && cellValue(still, 'B1') === 'café-Δ',
+    `hold: raced file is still intact (got ${truncateText(JSON.stringify(still?.cells), 180)})`);
+  rep.endSuite();
+}
+
 function suiteLive(rep, assert, ctx) {
   console.log('\n-- live --\n');
   rep.beginSuite('live');
@@ -292,6 +386,7 @@ function runSuites(ctx) {
   if (wantSuite('xlsx')) suiteXlsx(rep, stats.assert, ctx);
   if (wantSuite('pptx')) suitePptx(rep, stats.assert, ctx);
   if (wantSuite('reject')) suiteReject(rep, stats.assert, ctx);
+  if (wantSuite('hold')) suiteHold(rep, stats.assert, ctx);
   if (wantSuite('live')) suiteLive(rep, stats.assert, ctx);
   if (harness.onlyScopes && !SUITE_NAMES.some(wantSuite)) {
     throw new Error(`No matching suites for --only ${[...harness.onlyScopes].join(', ')}`);
@@ -316,7 +411,7 @@ try {
   sessionDir = boot.sessionDir;
   printAgentHarnessBanner(harness, { exe, runDir: boot.runDir, sessionDir: boot.sessionDir });
   rep.note(`Run artifacts: ${boot.runDir}`);
-  rep.note(`Mode: ${harness.mode}${harness.mode === 'live' ? `, preset=${harness.preset}` : ''}`);
+  rep.note(`Mode: ${harness.mode}${harness.mode === 'live' ? `, preset=${harness.preset || '(installed default)'}` : ''}`);
   runHarnessSuites(harness, {
     exe,
     ctx: boot.ctx,

@@ -1,5 +1,8 @@
 #include "agent_factory.hpp"
 #include "json/json_utils.hpp"
+#if defined(FEATURE_OFFICE_LLM_TOOLS) && FEATURE_OFFICE_LLM_TOOLS
+#  include "office_edit.h"
+#endif
 
 #include <cstdio>
 #include "agent_internal.hpp"  // detail::emit, detail::merge_llm_usage_from_provider_meta
@@ -1327,6 +1330,12 @@ Result Agent::run(const Turn&             turn,
                   const ProviderSettings& provider,
                   EventCallback           on_event) const
 {
+#if defined(FEATURE_OFFICE_LLM_TOOLS) && FEATURE_OFFICE_LLM_TOOLS
+    struct OfficeDocumentHold {
+        OfficeDocumentHold() { office::beginAgentDocuments(); }
+        ~OfficeDocumentHold() { office::endAgentDocuments(); }
+    } office_document_hold;
+#endif
     ensure_agent_process_path_has_exe_bin();
     AgentFactory::ensure_app_search_path();
 
