@@ -84,7 +84,7 @@ std::string file_mtime(const fs::path& file) {
     const auto stamp = fs::last_write_time(file, ec);
     if (ec)
         return {};
-    return std::to_string(stamp.time_since_epoch().count());
+    return std::to_string(static_cast<long long>(stamp.time_since_epoch().count()));
 }
 
 bool arg_bool(const nlohmann::json& args, const char* key, bool fallback) {

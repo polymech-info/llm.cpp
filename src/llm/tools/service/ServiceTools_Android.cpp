@@ -24,7 +24,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <vector>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -151,7 +154,60 @@ bool open_session(const std::string& profile_dir, pm::cms::CmsSession& session, 
   return pm::cms::resolve_cms_session(pm::k_tanit_service_server_base_default_u8, session, err);
 }
 
+bool mount_name_ok(const std::string& name)
+{
+  if (name.empty() || name.size() > 64 || name == "." || name == "..")
+    return false;
+  for (unsigned char c : name) {
+    if (c < 0x20 || c == '/' || c == '\\' || c == ':')
+      return false;
+  }
+  return true;
+}
+
 } // namespace
+
+nlohmann::json service_vfs_mounts(const std::string& profile_dir, std::string& err)
+{
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const auto listed = pm::cms::list_vfs_mounts(session.base, session.bearer);
+  if (!listed.ok) {
+    err = listed.err.empty() ? "Tanit VFS mounts failed" : listed.err;
+    return {};
+  }
+  if (!listed.json.is_array()) {
+    err = "Tanit VFS mounts were not a list";
+    return {};
+  }
+  std::vector<std::string> names;
+  for (const auto& row : listed.json) {
+    if (!row.is_object())
+      continue;
+    const std::string name = row.value("name", "");
+    if (!mount_name_ok(name))
+      continue;
+    if (std::find(names.begin(), names.end(), name) != names.end())
+      continue;
+    names.push_back(name);
+  }
+  std::sort(names.begin(), names.end(), [](const std::string& a, const std::string& b) {
+    auto lower = [](std::string text) {
+      for (char& c : text)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      return text;
+    };
+    return lower(a) < lower(b);
+  });
+  const auto home = std::find(names.begin(), names.end(), "home");
+  if (home != names.end() && home != names.begin())
+    std::rotate(names.begin(), home, home + 1);
+  nlohmann::json mounts = nlohmann::json::array();
+  for (const auto& name : names)
+    mounts.push_back({{"name", name}});
+  return {{"server", session.base}, {"mounts", std::move(mounts)}};
+}
 
 nlohmann::json service_vfs_list(const std::string& profile_dir,
                                 const std::string& mount,
