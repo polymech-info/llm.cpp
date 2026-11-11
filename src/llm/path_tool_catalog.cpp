@@ -25,6 +25,9 @@
 #if defined(FEATURE_INSTALLER_VFS) && FEATURE_INSTALLER_VFS
 #include "llm/tools/service/ServiceTools.hpp"
 #endif
+#if defined(FEATURE_OFFICE_LLM_TOOLS) && FEATURE_OFFICE_LLM_TOOLS
+#include "llm/tools/office/OfficeTools.hpp"
+#endif
 
 #include "llm/tools/computer_use/Tool_ComputerUse.hpp"
 #include "llm/tools/browser_use/Tool_BrowserUse.hpp"
@@ -362,6 +365,12 @@ std::vector<ToolDef> tool_catalog() {
     {
         const auto service_tools = detail::service_tool_catalog();
         out.insert(out.end(), service_tools.begin(), service_tools.end());
+    }
+#endif
+#if defined(FEATURE_OFFICE_LLM_TOOLS) && FEATURE_OFFICE_LLM_TOOLS
+    {
+        const auto office_tools = detail::office_tool_catalog();
+        out.insert(out.end(), office_tools.begin(), office_tools.end());
     }
 #endif
 #if defined(FEATURE_TOOLS_COMMAND_CREATION) && FEATURE_TOOLS_COMMAND_CREATION

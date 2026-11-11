@@ -41,6 +41,9 @@
 #if defined(FEATURE_INSTALLER_VFS) && FEATURE_INSTALLER_VFS
 #include "llm/tools/service/ServiceTools.hpp"
 #endif
+#if defined(FEATURE_OFFICE_LLM_TOOLS) && FEATURE_OFFICE_LLM_TOOLS
+#include "llm/tools/office/OfficeTools.hpp"
+#endif
 
 #include "llm/tools/computer_use/Tool_ComputerUse.hpp"
 #include "llm/tools/browser_use/Tool_BrowserUse.hpp"
@@ -339,6 +342,10 @@ ExecuteResult execute_impl(const std::string& name_in, const nlohmann::json& arg
 #if defined(FEATURE_INSTALLER_VFS) && FEATURE_INSTALLER_VFS
         if (detail::is_service_tool(name))
             return log_done(detail::do_service_tool(name, arguments));
+#endif
+#if defined(FEATURE_OFFICE_LLM_TOOLS) && FEATURE_OFFICE_LLM_TOOLS
+        if (detail::is_office_tool(name))
+            return log_done(detail::do_office_tool(name, arguments));
 #endif
 #if defined(FEATURE_TOOLS_COMMAND_CREATION) && FEATURE_TOOLS_COMMAND_CREATION
         if (name == "create_command")      return log_done(media::llm::create_command::execute(arguments));
