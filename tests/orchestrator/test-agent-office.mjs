@@ -102,6 +102,7 @@ function suiteDocx(rep, assert, ctx) {
       { name: 'office_set', arguments: { path: file, node: '/', find: 'Hello', replace: 'Hi' } },
       { name: 'office_swap', arguments: { path: file, node: '/body/p[1]', node2: '/body/p[2]' } },
       { name: 'office_view', arguments: { path: file, mode: 'text' } },
+      { name: 'office_view', arguments: { path: file, mode: 'markdown' } },
       { name: 'office_get', arguments: { path: file, node: '/body/p[1]' } },
       { name: 'office_validate', arguments: { path: file } },
     ],
@@ -119,8 +120,10 @@ function suiteDocx(rep, assert, ctx) {
   assert(String(views[0]?.text || '').includes('Heading1'), 'docx: outline names Heading1');
   assert(swapped?.ok === true, `docx: swap ok (got ${truncateText(JSON.stringify(swapped), 160)})`);
   const text = String(views[1]?.text || '');
+  const markdown = String(views[2]?.markdown || '');
   assert(text.includes('Hi') && !text.includes('Hello'), `docx: find/replace (got ${truncateText(text, 80)})`);
   assert(text.indexOf('Second') < text.indexOf('Hi'), `docx: swap order (got ${truncateText(text, 80)})`);
+  assert(markdown.includes('Second') && markdown.includes('Hi'), `docx: markdown (got ${truncateText(markdown, 80)})`);
   assert(JSON.stringify(got || {}).includes('Second'), 'docx: get reads the swapped first paragraph');
   assert(valid?.ok === true, 'docx: validate ok');
   assert(isZip(file), 'docx: file is a zip package');
@@ -143,16 +146,22 @@ function suiteXlsx(rep, assert, ctx) {
       { name: 'office_query', arguments: { path: file, selector: 'sheet[name=Sheet1] > row[1] > cell' } },
       { name: 'office_add', arguments: { path: file, parent: '/', type: 'sheet', props: { name: 'Data' } } },
       { name: 'office_view', arguments: { path: file, mode: 'outline' } },
+      { name: 'office_view', arguments: { path: file, mode: 'markdown' } },
     ],
   });
   const got = toolResultEnvelope(r.bundlePath, 'office_get');
   const queried = toolResultEnvelope(r.bundlePath, 'office_query');
-  const outline = toolResultEnvelope(r.bundlePath, 'office_view');
+  const views = toolEnvelopes(r.bundlePath, 'office_view');
+  const outline = views[0];
+  const sheet = views[1];
+  const cells = JSON.stringify(sheet?.cells || []);
   rep.step('xlsx edit', r.ms, truncateText(outline?.text, 80));
   assert(r.status === 0, `xlsx: agent exits 0 (status=${r.status})`);
   assert(JSON.stringify(got || {}).includes('Alice'), `xlsx: get A1 (got ${truncateText(JSON.stringify(got), 160)})`);
   assert(JSON.stringify(queried || {}).includes('Alice'), 'xlsx: query finds Alice');
   assert(String(outline?.text || '').includes('Data'), `xlsx: outline lists Data (got ${truncateText(outline?.text, 80)})`);
+  assert(String(sheet?.markdown || '').includes('Alice') && cells.includes('"A1"') && cells.includes('Alice'),
+    `xlsx: markdown cells (got ${truncateText(JSON.stringify(sheet), 160)})`);
   assert(isZip(file), 'xlsx: file is a zip package');
   rep.endSuite();
 }

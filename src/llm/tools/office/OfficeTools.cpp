@@ -76,7 +76,9 @@ int arg_index(const nlohmann::json& args) {
 }
 
 const char* k_gap =
-    "Supports docx paragraph/run/table/row/cell, xlsx sheet/row/cell, and pptx slide/shape/picture. "
+        "Read .docx, .xlsx, .pptx, .odt, .ods, and .odp as markdown. Spreadsheets also return cells. "
+        "Create and edit cover docx paragraph/run/table/row/cell, xlsx sheet/row/cell, and pptx slide/shape/picture. "
+        "OpenDocument create and edit are not implemented. "
     "Slide background and transition, and shape animation (fade, fly, zoom, wipe, and the other entrance/exit effects), are properties. "
     "Charts, pivots, raw XML, morph, emphasis animations, and HTML preview are not available.";
 
@@ -162,12 +164,12 @@ std::vector<ToolDef> office_tool_catalog() {
     return {
         ToolDef{"office_create", "Create a blank .docx, .xlsx, or .pptx. Fails if the file already exists." + description_tail,
             {{"type", "object"}, {"properties", {{"path", path}}}, {"required", {"path"}}}},
-        ToolDef{"office_view", "Read a document as plain text, an outline, or word/sheet/slide stats." + description_tail,
+        ToolDef{"office_view", "Read a document as markdown, plain text, an outline, or word/sheet/slide stats. Markdown on a spreadsheet includes cells." + description_tail,
             {{"type", "object"}, {"properties", {
                 {"path", path},
-                {"mode", {{"type", "string"}, {"enum", {"text", "outline", "stats"}}, {"description", "text, outline, or stats. Default text."}}},
+                {"mode", {{"type", "string"}, {"enum", {"text", "markdown", "outline", "stats"}}, {"description", "markdown returns the document and, for xlsx or ods, cells. text, outline, or stats are the other modes. Default text. OpenDocument text is markdown."}}},
             }}, {"required", {"path"}}}},
-        ToolDef{"office_get", "Read one office node as JSON. node is an office path such as /body/p[1], Sheet1!A1, or /slide[1]." + description_tail,
+        ToolDef{"office_get", "Read one office node as JSON. node is an office path such as /body/p[1], Sheet1!A1, or /slide[1]. For odt, ods, and odp, node / returns markdown and cells." + description_tail,
             {{"type", "object"}, {"properties", {
                 {"path", path},
                 {"node", {{"type", "string"}, {"description", "Office path. Default /."}}},
