@@ -18,13 +18,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { createAssert, cliExePath, brand } from '../../../../tests/orchestrator/test-commons.js';
+import { createAssert, cliExePath, brand } from '@polymech/tanit/tests/orchestrator/test-commons.js';
 import {
   buildMetricsBundle,
   createMetricsCollector,
   renderMarkdownReport,
   writeTestReports,
-} from '../../../../tests/orchestrator/reports.js';
+} from '@polymech/tanit/tests/orchestrator/reports.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RUN_DIR = join(PACKAGE_ROOT, 'stemp', 'agent-context-decide');

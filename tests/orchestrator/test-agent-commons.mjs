@@ -12,14 +12,14 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { buildMetricsBundle, renderMarkdownReport } from '../../../../tests/orchestrator/reports.js';
+import { buildMetricsBundle, renderMarkdownReport } from '@polymech/tanit/tests/orchestrator/reports.js';
 import {
   appendMarkdownChapter,
   getChapterTitle,
   getNpmScriptLabel,
   isAccumulateMode,
   TEST_REPORT_ALL_PATH,
-} from '../../../../tests/orchestrator/test-report-accumulate.mjs';
+} from '@polymech/tanit/tests/orchestrator/test-report-accumulate.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const STEMP_DIR = join(PACKAGE_ROOT, 'stemp');

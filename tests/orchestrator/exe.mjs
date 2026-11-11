@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
-import { cliExePath } from '../../../../tests/orchestrator/test-commons.js';
+import { cliExePath } from '@polymech/tanit/tests/orchestrator/test-commons.js';
 
 /** Tanit CLI, or pm-llm when PM_LLM_EXE is set. */
 export function llmExe() {

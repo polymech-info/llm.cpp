@@ -25,15 +25,15 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { createAssert, cliExePath, brand } from '../../../../tests/orchestrator/test-commons.js';
-import { buildMetricsBundle, createMetricsCollector, renderMarkdownReport } from '../../../../tests/orchestrator/reports.js';
+import { createAssert, cliExePath, brand } from '@polymech/tanit/tests/orchestrator/test-commons.js';
+import { buildMetricsBundle, createMetricsCollector, renderMarkdownReport } from '@polymech/tanit/tests/orchestrator/reports.js';
 import {
   appendMarkdownChapter,
   getChapterTitle,
   getNpmScriptLabel,
   isAccumulateMode,
   TEST_REPORT_ALL_PATH,
-} from '../../../../tests/orchestrator/test-report-accumulate.mjs';
+} from '@polymech/tanit/tests/orchestrator/test-report-accumulate.mjs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(__dirname, 'fixtures');
 const STEMP_DIR = join(PACKAGE_ROOT, 'stemp');

@@ -16,11 +16,11 @@
  *   --only docx,xlsx,pptx,reject,live
  *   --require-live
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { createAssert, brand } from '../../../../tests/orchestrator/test-commons.js';
-import { createMetricsCollector } from '../../../../tests/orchestrator/reports.js';
+import { createAssert, brand } from '@polymech/tanit/tests/orchestrator/test-commons.js';
+import { createMetricsCollector } from '@polymech/tanit/tests/orchestrator/reports.js';
 import { llmExe } from './exe.mjs';
 import {
   TEST_REPORT_PATH,
@@ -161,6 +161,10 @@ function suitePptx(rep, assert, ctx) {
   console.log('\n-- pptx --\n');
   rep.beginSuite('pptx');
   const file = join(ctx.cwd, 'deck.pptx');
+  const png = join(ctx.cwd, 'pixel.png');
+  writeFileSync(png, Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64'));
   const r = scripted(ctx, {
     suite: 'pptx',
     index: 1,
@@ -169,16 +173,24 @@ function suitePptx(rep, assert, ctx) {
       { name: 'office_create', arguments: { path: file } },
       { name: 'office_add', arguments: { path: file, parent: '/', type: 'slide', props: { title: 'Deck' } } },
       { name: 'office_add', arguments: { path: file, parent: '/slide[1]', type: 'shape', props: { text: 'Body' } } },
+      { name: 'office_set', arguments: { path: file, node: '/slide[1]', props: { background: '1B2838', transition: 'fade' } } },
+      { name: 'office_set', arguments: { path: file, node: '/slide[1]/shape[2]', props: { animation: 'fade-entrance-500' } } },
+      { name: 'office_add', arguments: { path: file, parent: '/slide[1]', type: 'picture', props: { src: png, name: 'Shot' } } },
       { name: 'office_view', arguments: { path: file, mode: 'text' } },
       { name: 'office_validate', arguments: { path: file } },
     ],
   });
   const viewed = toolResultEnvelope(r.bundlePath, 'office_view');
+  const styled = toolEnvelopes(r.bundlePath, 'office_set');
+  const added = toolEnvelopes(r.bundlePath, 'office_add');
+  const pictured = added[added.length - 1];
   const valid = toolResultEnvelope(r.bundlePath, 'office_validate');
   const text = String(viewed?.text || '');
   rep.step('pptx edit', r.ms, truncateText(text, 80));
   assert(r.status === 0, `pptx: agent exits 0 (status=${r.status})`);
   assert(text.includes('Deck') && text.includes('Body'), `pptx: view text (got ${truncateText(text, 80)})`);
+  assert(styled.length === 2 && styled.every((e) => e.ok === true), `pptx: transition and animation (got ${truncateText(JSON.stringify(styled), 160)})`);
+  assert(pictured?.ok === true && String(pictured?.path || '').includes('picture'), `pptx: picture placed (got ${truncateText(JSON.stringify(pictured), 160)})`);
   assert(valid?.ok === true, 'pptx: validate ok');
   assert(isZip(file), 'pptx: file is a zip package');
   rep.endSuite();

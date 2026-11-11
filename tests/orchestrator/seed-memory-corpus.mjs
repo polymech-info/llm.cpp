@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { securityExePath } from '../../../../tests/orchestrator/test-commons.js';
+import { securityExePath } from '@polymech/tanit/tests/orchestrator/test-commons.js';
 
 const TOPICS = [
   'family trip packing list',

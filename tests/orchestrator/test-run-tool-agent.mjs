@@ -19,8 +19,8 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { createAssert } from '../../../../tests/orchestrator/test-commons.js';
-import { renderMarkdownReport } from '../../../../tests/orchestrator/reports.js';
+import { createAssert } from '@polymech/tanit/tests/orchestrator/test-commons.js';
+import { renderMarkdownReport } from '@polymech/tanit/tests/orchestrator/reports.js';
 
 import { REPO } from './repo.mjs';
 const TEST_REPORT_PATH = join(REPO, 'tests', 'test-report-last.md');

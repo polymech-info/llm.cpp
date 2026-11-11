@@ -26,8 +26,8 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, cpSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { cliExePath, createAssert, brand } from '../../../../tests/orchestrator/test-commons.js';
-import { createMetricsCollector } from '../../../../tests/orchestrator/reports.js';
+import { cliExePath, createAssert, brand } from '@polymech/tanit/tests/orchestrator/test-commons.js';
+import { createMetricsCollector } from '@polymech/tanit/tests/orchestrator/reports.js';
 import {
   PACKAGE_ROOT,
   TEST_REPORT_PATH,

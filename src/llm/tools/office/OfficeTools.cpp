@@ -76,8 +76,9 @@ int arg_index(const nlohmann::json& args) {
 }
 
 const char* k_gap =
-    "Supports docx paragraph/run/table/row/cell, xlsx sheet/row/cell, and pptx slide/shape. "
-    "Charts, pivots, raw XML, animations, watch, and HTML preview are not available.";
+    "Supports docx paragraph/run/table/row/cell, xlsx sheet/row/cell, and pptx slide/shape/picture. "
+    "Slide background and transition, and shape animation (fade, fly, zoom, wipe, and the other entrance/exit effects), are properties. "
+    "Charts, pivots, raw XML, morph, emphasis animations, and HTML preview are not available.";
 
 nlohmann::json file_schema() {
     return {{"type", "string"}, {"description", "Filesystem path of a .docx, .xlsx, or .pptx file."}};
@@ -86,7 +87,7 @@ nlohmann::json file_schema() {
 nlohmann::json props_schema() {
     return {
         {"type", "object"},
-        {"description", "String properties: text, value, bold, italic, style, color, size, font, rows, cols, name, ref, x, y, w, h, title, or c1/c2 for an xlsx row."},
+        {"description", "String properties: text, value, bold, italic, style, color, size, font, fill, preset, animation, background, transition, src, rows, cols, name, ref, x, y, w, h, title, or c1/c2 for an xlsx row."},
         {"additionalProperties", {{"type", "string"}}},
     };
 }
@@ -177,17 +178,17 @@ std::vector<ToolDef> office_tool_catalog() {
                 {"path", path},
                 {"selector", {{"type", "string"}, {"description", "Selector, for example paragraph[style=Heading1] or cell[value=Alice]."}}},
             }}, {"required", {"path", "selector"}}}},
-        ToolDef{"office_add", "Add a paragraph, run, table, row, cell, sheet, slide, or shape." + description_tail,
+        ToolDef{"office_add", "Add a paragraph, run, table, row, cell, sheet, slide, shape, or picture." + description_tail,
             {{"type", "object"}, {"properties", {
                 {"path", path},
                 {"parent", {{"type", "string"}, {"description", "Parent office path. Default /."}}},
-                {"type", {{"type", "string"}, {"description", "paragraph, run, table, row, cell, sheet, slide, or shape."}}},
+                {"type", {{"type", "string"}, {"description", "paragraph, run, table, row, cell, sheet, slide, shape, or picture."}}},
                 {"props", props},
                 {"after", {{"type", "string"}}},
                 {"before", {{"type", "string"}}},
                 {"index", {{"type", "integer"}, {"description", "0-based for docx. 1-based row number for xlsx."}}},
             }}, {"required", {"path", "type"}}}},
-        ToolDef{"office_set", "Set properties on a node, or find and replace text." + description_tail,
+        ToolDef{"office_set", "Set properties on a node, including pptx animation, transition, and background, or find and replace text." + description_tail,
             {{"type", "object"}, {"properties", {
                 {"path", path},
                 {"node", {{"type", "string"}, {"description", "Office path. Use / with find to search the document."}}},

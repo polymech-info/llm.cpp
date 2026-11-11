@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { cliExePath, securityExePath, brand } from '../../../../tests/orchestrator/test-commons.js';
+import { cliExePath, securityExePath, brand } from '@polymech/tanit/tests/orchestrator/test-commons.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const STEMP_DIR = join(PACKAGE_ROOT, 'stemp', 'agent-lifecycle');

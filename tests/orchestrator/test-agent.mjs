@@ -21,7 +21,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cliExePath, brand, brandK } from '../../../../tests/orchestrator/test-commons.js';
+import { cliExePath, brand, brandK } from '@polymech/tanit/tests/orchestrator/test-commons.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STEMP_DIR = join(PACKAGE_ROOT, 'stemp');
