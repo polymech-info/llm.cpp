@@ -7,14 +7,17 @@
 
 #include "pm/audio/tts/reader.hpp"
 
+#include "core/cli_cancel.hpp"
 #include "core/settings_runtime.hpp"
 #include "core/settings_store.hpp"
 #include "fs/path_sanitizer.hpp"
 #include "llm/agent.hpp"
 #include "llm/agent_launch.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 
 #if defined(__ANDROID__)
@@ -31,6 +34,9 @@
 #include "core/audio_devices.hpp"
 #include "logging/logger.h"
 #include "tts/proxy_tts.hpp"
+#endif
+#if defined(_WIN32)
+#include "win/overlay_hud.hpp"
 #endif
 #endif
 
@@ -398,9 +404,18 @@ ExecuteResult do_read(const nlohmann::json& args) {
     if (voice.empty() || voice == pm::audio::constants::k_elevenlabs_voice_id)
         voice = pm::audio::constants::k_proxy_default_voice;
 
+#if defined(_WIN32)
+    auto hud = std::make_unique<media::win::OverlayJob>("Read");
+    {
+        std::string title = fs::path(store.path).filename().string();
+        if (title.size() > 42)
+            title = title.substr(0, 39) + "...";
+        hud->busy(title.empty() ? "speaking" : title);
+    }
+#endif
     const pm::tts::DocumentSpeech speech = pm::tts::proxy_tts_document(
         text, provider.base_url, provider.api_key, model, voice, true, 400, 800,
-        [](const pm::tts::SpeechProgress& step) {
+        [&](const pm::tts::SpeechProgress& step) {
             pm::tts::reader::WorkProgress progress;
             progress.phase = "speak";
             progress.index = static_cast<std::int64_t>(step.index);
@@ -409,11 +424,28 @@ ExecuteResult do_read(const nlohmann::json& args) {
             progress.whole = static_cast<std::int64_t>(step.chars_total);
             progress.elapsed_ms = step.elapsed_ms;
             logger::info(std::string("[read] ") + pm::tts::reader::format_progress(progress));
+#if defined(_WIN32)
+            if (hud && step.count > 0) {
+                hud->progress(static_cast<std::uint64_t>(step.index),
+                              static_cast<std::uint64_t>(step.count),
+                              std::to_string(step.index) + " / " + std::to_string(step.count));
+            }
+#endif
         });
-    if (speech.cancelled)
+    if (speech.cancelled) {
+#if defined(_WIN32)
+        if (hud)
+            hud->busy("cancelled");
+#endif
         return fatal("read: cancelled");
-    if (!speech.error.empty() || speech.audio.empty())
+    }
+    if (!speech.error.empty() || speech.audio.empty()) {
+#if defined(_WIN32)
+        if (hud)
+            hud->error(speech.error.empty() ? "no audio" : speech.error);
+#endif
         return fatal("read: " + (speech.error.empty() ? "server returned empty audio" : speech.error));
+    }
 
     fs::path dst_path(dst);
     if (speech.format == "wav" && dst_path.extension() == ".mp3")
@@ -423,14 +455,28 @@ ExecuteResult do_read(const nlohmann::json& args) {
         if (dst_path.has_parent_path())
             fs::create_directories(dst_path.parent_path(), ec);
         std::ofstream out(dst_path, std::ios::binary | std::ios::trunc);
-        if (!out)
+        if (!out) {
+#if defined(_WIN32)
+            if (hud)
+                hud->error("cannot write");
+#endif
             return fatal("read: cannot write " + dst_path.generic_string());
+        }
         out.write(reinterpret_cast<const char*>(speech.audio.data()),
                   static_cast<std::streamsize>(speech.audio.size()));
-        if (!out)
+        if (!out) {
+#if defined(_WIN32)
+            if (hud)
+                hud->error("cannot write");
+#endif
             return fatal("read: cannot write " + dst_path.generic_string());
+        }
     }
-    if (play) {
+    if (play && !media::cli::cancel_requested()) {
+#if defined(_WIN32)
+        if (hud)
+            hud->busy("playing");
+#endif
         pm::audio::AudioOutput player;
         try {
             set_active_speak_output(&player);
@@ -438,9 +484,31 @@ ExecuteResult do_read(const nlohmann::json& args) {
             clear_active_speak_output(&player);
         } catch (const std::exception& ex) {
             clear_active_speak_output(&player);
+            if (media::cli::cancel_requested()) {
+#if defined(_WIN32)
+                if (hud)
+                    hud->busy("cancelled");
+#endif
+                return fatal("read: cancelled");
+            }
+#if defined(_WIN32)
+            if (hud)
+                hud->error(ex.what());
+#endif
             return fatal(std::string("read: saved ") + dst_path.generic_string() + " playback: " + ex.what());
         }
     }
+    if (media::cli::cancel_requested()) {
+#if defined(_WIN32)
+        if (hud)
+            hud->busy("cancelled");
+#endif
+        return fatal("read: cancelled");
+    }
+#if defined(_WIN32)
+    if (hud)
+        hud->completed("done");
+#endif
     return simple_ok({
         {"tool", "read"},
         {"provider", provider.provider},
