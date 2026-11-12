@@ -5,6 +5,7 @@
  */
 #include "pm_android_service.hpp"
 #include "fs/path_sanitizer.hpp"
+#include "pm/vfs/store.hpp"
 
 #include "cms/cms_host.hpp"
 #include "cms/pm_cms_ai_gateway.hpp"
@@ -27,10 +28,13 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <vector>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -154,14 +158,121 @@ bool open_session(const std::string& profile_dir, pm::cms::CmsSession& session, 
   return pm::cms::resolve_cms_session(pm::k_tanit_service_server_base_default_u8, session, err);
 }
 
-bool mount_name_ok(const std::string& name)
+bool remote_target(const std::string& mount,
+                   const std::string& path,
+                   bool allow_empty,
+                   std::string& use_mount,
+                   std::string& clean,
+                   std::string& err)
 {
-  if (name.empty() || name.size() > 64 || name == "." || name == "..")
+  use_mount = mount.empty() ? "home" : mount;
+  if (!pm::vfs::mount_name_ok(use_mount)) {
+    err = "unknown mount";
     return false;
-  for (unsigned char c : name) {
-    if (c < 0x20 || c == '/' || c == '\\' || c == ':')
-      return false;
   }
+  pm::vfs::Error verr;
+  clean = pm::vfs::sanitize_subpath(path, verr);
+  if (verr || (!allow_empty && clean.empty())) {
+    err = "path escapes the shared folder";
+    return false;
+  }
+  return true;
+}
+
+std::string cache_scope(const std::string& profile_dir, const std::string& server)
+{
+  nlohmann::json bundle;
+  std::string load_err;
+  std::string account;
+  if (pm::android::oauth_load(profile_dir, bundle, load_err) &&
+      bundle.contains("app_user_id") && bundle["app_user_id"].is_string())
+    account = bundle["app_user_id"].get<std::string>();
+  return server + "\n" + account;
+}
+
+fs::path cached_file(const std::string& profile_dir,
+                     const pm::cms::CmsSession& session,
+                     const fs::path& root,
+                     const std::string& mount,
+                     const std::string& path,
+                     std::string& err)
+{
+  pm::vfs::Error verr;
+  const std::string name = pm::vfs::object_filename(
+      cache_scope(profile_dir, session.base), mount, path);
+  const fs::path dest = pm::vfs::confine_local(root, name, verr);
+  if (verr || dest.empty()) {
+    err = "cache path is invalid";
+    return {};
+  }
+  return dest;
+}
+
+std::shared_ptr<std::mutex> mutex_for(const fs::path& dest)
+{
+  static std::mutex gate;
+  static std::unordered_map<std::string, std::shared_ptr<std::mutex>> locks;
+  std::lock_guard<std::mutex> hold(gate);
+  auto& found = locks[media::path::path_to_generic_utf8(dest)];
+  if (!found)
+    found = std::make_shared<std::mutex>();
+  return found;
+}
+
+struct CachedFileLock {
+  std::shared_ptr<std::mutex> slot;
+  std::unique_lock<std::mutex> hold;
+  explicit CachedFileLock(const fs::path& path)
+      : slot(mutex_for(path)), hold(*slot) {}
+};
+
+bool pull_into(const pm::cms::CmsSession& session,
+               const std::string& mount,
+               const std::string& path,
+               const fs::path& dest,
+               std::int64_t expected_size,
+               const std::function<bool()>& cancelled,
+               std::uint64_t& bytes,
+               std::string& err)
+{
+  const CachedFileLock busy(dest);
+  std::error_code ec;
+  fs::create_directories(dest.parent_path(), ec);
+  if (ec) {
+    err = "could not create the cache directory";
+    return false;
+  }
+  const fs::path incoming = pm::vfs::make_cache_temp(dest.parent_path());
+  pm::cms::VfsDownloadOptions options;
+  options.bearer_token = session.bearer;
+  options.overwrite = true;
+  options.skip_existing = false;
+  options.keep_partial = false;
+  options.retries = 0;
+  options.timeout_ms = 120'000;
+  options.connect_timeout_ms = 5'000;
+  options.expected_size = expected_size;
+  options.cancel_check = cancelled;
+  const auto downloaded = pm::cms::download_vfs_file_to_path(
+      session.base, mount, path, incoming, std::move(options));
+  if (!downloaded.ok) {
+    err = downloaded.err.empty() ? "Tanit VFS download failed" : downloaded.err;
+    pm::vfs::discard_incoming(incoming);
+    return false;
+  }
+  if (expected_size >= 0 &&
+      downloaded.bytes_written != static_cast<std::uint64_t>(expected_size)) {
+    pm::vfs::discard_incoming(incoming);
+    err = "incomplete transfer";
+    return false;
+  }
+  pm::vfs::Error verr;
+  if (!pm::vfs::publish_local(incoming, dest, verr)) {
+    pm::vfs::discard_incoming(incoming);
+    err = verr.message.empty() ? "could not publish the downloaded file" : verr.message;
+    return false;
+  }
+  bytes = downloaded.bytes_written;
   return true;
 }
 
@@ -186,7 +297,7 @@ nlohmann::json service_vfs_mounts(const std::string& profile_dir, std::string& e
     if (!row.is_object())
       continue;
     const std::string name = row.value("name", "");
-    if (!mount_name_ok(name))
+    if (!pm::vfs::mount_name_ok(name))
       continue;
     if (std::find(names.begin(), names.end(), name) != names.end())
       continue;
@@ -214,12 +325,15 @@ nlohmann::json service_vfs_list(const std::string& profile_dir,
                                 const std::string& path,
                                 std::string& err)
 {
+  std::string use_mount;
+  std::string clean;
+  if (!remote_target(mount, path, true, use_mount, clean, err))
+    return {};
   pm::cms::CmsSession session;
   if (!open_session(profile_dir, session, err))
     return {};
-  const std::string use_mount = mount.empty() ? "home" : mount;
   const auto listed = pm::cms::list_vfs_files(
-      session.base, session.bearer, use_mount, path, true);
+      session.base, session.bearer, use_mount, clean, true);
   if (!listed.ok) {
     err = listed.err.empty() ? "Tanit VFS list failed" : listed.err;
     return {};
@@ -231,12 +345,13 @@ nlohmann::json service_vfs_list(const std::string& profile_dir,
         {"path", item.path},
         {"mime", item.mime},
         {"size", item.size},
+        {"mtime", item.mtime_ms},
         {"is_directory", item.is_directory},
     });
   }
   return {
       {"mount", use_mount},
-      {"path", path},
+      {"path", clean},
       {"server", session.base},
       {"entries", std::move(entries)},
   };
@@ -247,38 +362,234 @@ nlohmann::json service_vfs_stage(const std::string& profile_dir,
                                  const std::string& path,
                                  std::string& err)
 {
-  if (path.empty()) {
-    err = "Choose a file inside Tanit VFS";
+  std::string use_mount;
+  std::string clean;
+  if (!remote_target(mount, path, false, use_mount, clean, err)) {
+    if (path.empty())
+      err = "Choose a file inside Tanit VFS";
     return {};
   }
   pm::cms::CmsSession session;
   if (!open_session(profile_dir, session, err))
     return {};
-  const std::string use_mount = mount.empty() ? "home" : mount;
-  const fs::path dir = media::path::path_from_utf8(profile_dir) / "workspace" / "vfs";
+  const fs::path root = pm::vfs::workspace_root(media::path::path_from_utf8(profile_dir));
   std::error_code ec;
-  fs::create_directories(dir, ec);
+  fs::create_directories(root, ec);
   if (ec) {
     err = "could not create the VFS workspace";
     return {};
   }
-  const fs::path dest = dir / safe_leaf(path);
-  pm::cms::VfsDownloadOptions options;
-  options.bearer_token = session.bearer;
-  options.overwrite = true;
-  options.skip_existing = false;
-  const auto downloaded = pm::cms::download_vfs_file_to_path(
-      session.base, use_mount, path, dest, std::move(options));
-  if (!downloaded.ok) {
-    err = downloaded.err.empty() ? "Tanit VFS download failed" : downloaded.err;
+  const fs::path dest = cached_file(profile_dir, session, root, use_mount, clean, err);
+  if (dest.empty())
     return {};
-  }
+  std::uint64_t bytes = 0;
+  if (!pull_into(session, use_mount, clean, dest, -1, {}, bytes, err))
+    return {};
   return {
       {"mount", use_mount},
-      {"path", path},
-      {"local_path", media::path::path_to_utf8(downloaded.local_path)},
-      {"label", safe_leaf(path)},
+      {"path", clean},
+      {"local_path", media::path::path_to_utf8(dest)},
+      {"label", safe_leaf(clean)},
   };
+}
+
+nlohmann::json service_vfs_cache_name(const std::string& profile_dir,
+                                      const std::string& mount,
+                                      const std::string& path,
+                                      std::string& err)
+{
+  std::string use_mount;
+  std::string clean;
+  if (!remote_target(mount, path, false, use_mount, clean, err))
+    return {};
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const std::string name = pm::vfs::object_filename(
+      cache_scope(profile_dir, session.base), use_mount, clean);
+  if (name.empty() || name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
+    err = "cache path is invalid";
+    return {};
+  }
+  return {{"name", name}, {"mount", use_mount}, {"path", clean}};
+}
+
+nlohmann::json service_vfs_fetch(const std::string& profile_dir,
+                                 const std::string& mount,
+                                 const std::string& path,
+                                 std::int64_t expected_size,
+                                 const std::function<bool()>& cancelled,
+                                 std::string& err)
+{
+  std::string use_mount;
+  std::string clean;
+  if (!remote_target(mount, path, false, use_mount, clean, err))
+    return {};
+  const fs::path root = pm::vfs::cache_root(media::path::path_from_utf8(profile_dir));
+  std::error_code ec;
+  fs::create_directories(root, ec);
+  if (ec) {
+    err = "cache path is invalid";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const fs::path dest = cached_file(profile_dir, session, root, use_mount, clean, err);
+  if (dest.empty())
+    return {};
+  std::uint64_t bytes = 0;
+  if (!pull_into(session, use_mount, clean, dest, expected_size, cancelled, bytes, err))
+    return {};
+  return {
+      {"mount", use_mount},
+      {"path", clean},
+      {"local_path", media::path::path_to_utf8(dest)},
+      {"bytes", bytes},
+  };
+}
+
+nlohmann::json service_vfs_upload(const std::string& profile_dir,
+                                  const std::string& mount,
+                                  const std::string& path,
+                                  const std::string& cache_key,
+                                  std::string& err)
+{
+  std::string use_mount;
+  std::string clean;
+  if (!remote_target(mount, path, false, use_mount, clean, err))
+    return {};
+  const fs::path root = pm::vfs::cache_root(media::path::path_from_utf8(profile_dir));
+  pm::vfs::Error verr;
+  const fs::path local = pm::vfs::confine_local(root, cache_key, verr);
+  if (verr || local.empty()) {
+    err = "local file is invalid";
+    return {};
+  }
+  std::error_code ec;
+  if (!fs::is_regular_file(local, ec) || ec) {
+    err = "local file is invalid";
+    return {};
+  }
+  (void)fs::file_size(local, ec);
+  if (ec) {
+    err = "local file is invalid";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const auto uploaded = pm::cms::upload_vfs_file(
+      session.base, session.bearer, local, use_mount, clean);
+  if (!uploaded.ok) {
+    err = uploaded.err.empty() ? "Tanit VFS upload failed" : uploaded.err;
+    return {};
+  }
+  return {{"mount", uploaded.mount}, {"path", uploaded.path}};
+}
+
+nlohmann::json service_vfs_mkdir(const std::string& profile_dir,
+                                 const std::string& mount,
+                                 const std::string& path,
+                                 std::string& err)
+{
+  std::string use_mount;
+  std::string clean;
+  if (!remote_target(mount, path, false, use_mount, clean, err))
+    return {};
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const std::string base = pm::cms::trim_trailing_slash(session.base);
+  const std::string rel = pm::cms::encode_vfs_relative_path(clean);
+  const std::string mounted =
+      "/api/vfs/mkdir/" + pm::cms::percent_encode_path_segment(use_mount) + "/" + rel;
+  long http = 0;
+  std::string body;
+  std::string mk_err;
+  if (!pm::cms::http_post_json(base, mounted, session.bearer, "{}", http, body, mk_err)) {
+    err = mk_err.empty() ? "Tanit VFS mkdir failed" : mk_err;
+    return {};
+  }
+  if (http == 404 && use_mount == "home") {
+    long home_http = 0;
+    std::string home_body;
+    std::string home_err;
+    if (pm::cms::http_post_json(base, "/api/vfs/mkdir/" + rel, session.bearer, "{}", home_http, home_body, home_err) &&
+        home_http >= 200 && home_http < 300) {
+      return {{"mount", use_mount}, {"path", clean}};
+    }
+  }
+  if (http < 200 || http >= 300) {
+    err = body.empty() ? "Tanit VFS mkdir failed" : body.substr(0, 240);
+    return {};
+  }
+  return {{"mount", use_mount}, {"path", clean}};
+}
+
+nlohmann::json service_vfs_delete(const std::string& profile_dir,
+                                  const std::string& mount,
+                                  const std::string& path,
+                                  std::string& err)
+{
+  std::string use_mount;
+  std::string clean;
+  if (!remote_target(mount, path, false, use_mount, clean, err))
+    return {};
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const auto deleted = pm::cms::delete_vfs_path(session.base, session.bearer, use_mount, clean);
+  const bool gone = deleted.http_status == 404 ||
+                    (deleted.http_status >= 200 && deleted.http_status < 300);
+  if (!deleted.ok || !gone) {
+    err = deleted.err.empty() ? "Tanit VFS delete failed" : deleted.err;
+    return {};
+  }
+  return {{"mount", use_mount}, {"path", clean}};
+}
+
+nlohmann::json service_vfs_move(const std::string& profile_dir,
+                                const std::string& mount,
+                                const std::string& path,
+                                const std::string& to_path,
+                                std::string& err)
+{
+  std::string use_mount;
+  std::string clean;
+  if (!remote_target(mount, path, false, use_mount, clean, err))
+    return {};
+  std::string dest_mount;
+  std::string dest_clean;
+  if (!remote_target(use_mount, to_path, false, dest_mount, dest_clean, err))
+    return {};
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const nlohmann::json body = {
+      {"operation", "move"},
+      {"conflictStrategy", "error"},
+      {"excludeDefault", false},
+      {"source", {{"mount", use_mount}, {"path", clean}}},
+      {"destination", {{"mount", use_mount}, {"path", dest_clean}}},
+  };
+  const std::string base = pm::cms::trim_trailing_slash(session.base);
+  long http = 0;
+  std::string response;
+  std::string move_err;
+  if (!pm::cms::http_post_json(base, "/api/vfs/copy", session.bearer, body.dump(), http, response, move_err)) {
+    err = move_err.empty() ? "Tanit VFS move failed" : move_err;
+    return {};
+  }
+  if (http == 409) {
+    err = "already exists";
+    return {};
+  }
+  if (http < 200 || http >= 300) {
+    err = response.empty() ? "Tanit VFS move failed" : response.substr(0, 240);
+    return {};
+  }
+  return {{"mount", use_mount}, {"path", dest_clean}};
 }
 
 namespace {
