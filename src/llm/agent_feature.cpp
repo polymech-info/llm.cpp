@@ -218,20 +218,36 @@ std::string planner_strip_json_fence(std::string s)
     return s;
 }
 
+bool path_looks_like_raster(std::string_view p);
+
 // Minimal allowlist used when the planner cannot (or chooses not to) seed a
 // tool subset. Pins planner_path_tool_allowlist_set so ToolsFeature does not
 // fall open to the full path catalog. request_tools can still grant more.
+// A selected raster is added here too: the parse-failure path returns before
+// the later auto-add, and that is the turn that needed image_understand.
 void pin_planner_tool_safety_net(Turn& turn,
                                  bool is_fallback,
                                  const std::string& reason,
                                  const char* meta_flag)
 {
-    static const std::vector<std::string> k_safety_net{
-        "info_lookup", "memory_read", "memory_write"};
-    turn.allowed_path_tools = k_safety_net;
+    std::vector<std::string> tools{"info_lookup", "memory_read", "memory_write"};
+    const bool raster = std::any_of(
+        turn.selection.begin(), turn.selection.end(),
+        [](const std::string& path) { return path_looks_like_raster(path); });
+#if defined(FEATURE_HOME_LLM_TOOLS) && FEATURE_HOME_LLM_TOOLS
+    const bool understand_registered = pm::llm::agent_tool_find_by_name("image_understand") != nullptr;
+#else
+    const bool understand_registered = false;
+#endif
+    if (raster && understand_registered
+            && std::find(tools.begin(), tools.end(), "image_understand") == tools.end()) {
+        tools.push_back("image_understand");
+        turn.planner_meta["auto_added_image_understand"] = true;
+    }
+    turn.allowed_path_tools = tools;
     turn.planner_path_tool_allowlist_set = true;
-    turn.planner_meta["selected_tools"] = k_safety_net;
-    turn.planner_meta["valid_selected_tools"] = k_safety_net;
+    turn.planner_meta["selected_tools"] = tools;
+    turn.planner_meta["valid_selected_tools"] = tools;
     turn.planner_meta["fallback"] = is_fallback;
     if (meta_flag && *meta_flag)
         turn.planner_meta[meta_flag] = true;
@@ -1639,6 +1655,16 @@ void apply_planner_tool_selection(Turn& turn, const ProviderSettings& provider)
             return;
         }
         turn.planner_meta["rescued_from_multiblock"] = true;
+    }
+
+    // A bare JSON number or string is a successful parse. "1+2 ?" can come
+    // back as 3. value() is only valid on an object and throws type_error.306.
+    if (!doc.is_object()) {
+        const std::string reason = planner_short_reason(
+            "planner JSON parse failed (selection was not an object)");
+        logger::warn(std::string("agent planner: ") + reason);
+        pin_planner_tool_safety_net(turn, /*is_fallback=*/true, reason, "failure_safety_net");
+        return;
     }
 
     const nlohmann::json selected_json = doc.value("selected_tools", nlohmann::json::array());

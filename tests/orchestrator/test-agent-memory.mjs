@@ -258,7 +258,7 @@ function suiteExactTurnRetrieval(rep, assert, ctx) {
   assert(String(full?.final_text || '').startsWith(head), 'exact-turn r2: body preserves head sentinel');
   assert(String(full?.final_text || '').endsWith(tail), 'exact-turn r2: body preserves tail sentinel');
   const prompt2 = systemPromptFromBundle(r2.bundlePath);
-  assert(prompt2.includes(`- ${itemId}:`), 'exact-turn r2: compact prompt exposes exact turn ID');
+  assert(prompt2.includes(`[${itemId}]`), 'exact-turn r2: compact prompt exposes exact turn ID');
   assert(/body_available=true/.test(prompt2), 'exact-turn r2: compact prompt exposes body hint');
   assert(/memory_find\(itemId=<turn id>, includeBody=true\)/.test(prompt2),
     'exact-turn r2: prompt explains progressive body retrieval');
@@ -816,8 +816,8 @@ function suiteMemoryRecallPending(rep, assert, ctx) {
   rep.step('turn 2 query', r2.ms, `ok=${r2.json?.ok}`);
   assert(r2.status === 0, 'recall-pending r2: exits 0');
   const sys2 = systemPromptFromBundle(r2.bundlePath);
-  assert(/## Session Items/i.test(sys2),
-    'recall-pending r2: Session Items present');
+  assert(/## Recent turns/i.test(sys2),
+    'recall-pending r2: Recent turns present');
   assert(/## Recalled memory/i.test(sys2),
     'recall-pending r2: system prompt contains Recalled memory block');
   assert(/## Recalled memory[\s\S]*\[global\][\s\S]*Buddy/i.test(sys2),

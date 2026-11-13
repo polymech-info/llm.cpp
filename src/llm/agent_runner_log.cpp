@@ -7,11 +7,14 @@
 
 #include <chrono>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
+#include <system_error>
 #include <iomanip>
 #include <sstream>
 #include <string_view>
 #include "fs/path_sanitizer.hpp"
+#include "logging/logger.h"
 
 namespace media::llm::agent {
 namespace {
@@ -417,9 +420,28 @@ void persist_agent_run_log_json(const AgentRunLogWriteOptions& opts, const nlohm
     if (opts.log_path.empty())
         return;
 
-    std::ofstream f(opts.log_path, std::ios::out | std::ios::trunc);
-    if (f)
-        f << detail::safe_json_dump(logj, 2) << "\n";
+    std::error_code ec;
+    std::filesystem::create_directories(opts.log_path.parent_path(), ec);
+    if (ec) {
+        logger::error("[agent-log] mkdir " +
+                      media::path::path_to_utf8(opts.log_path.parent_path()) + ": " +
+                      ec.message());
+        return;
+    }
+    // ofstream(fs::path) does not create files under the Android app dir.
+#if defined(__ANDROID__)
+    const std::string dest = media::path::path_to_utf8(opts.log_path);
+    std::ofstream f(dest.c_str(), std::ios::out | std::ios::binary | std::ios::trunc);
+#else
+    std::ofstream f(opts.log_path, std::ios::out | std::ios::binary | std::ios::trunc);
+#endif
+    if (!f) {
+        logger::error("[agent-log] open failed " + media::path::path_to_utf8(opts.log_path));
+        return;
+    }
+    f << detail::safe_json_dump(logj, 2) << "\n";
+    if (!f)
+        logger::error("[agent-log] write failed " + media::path::path_to_utf8(opts.log_path));
 }
 
 void persist_agent_run_log(const AgentRunLogWriteOptions& opts,

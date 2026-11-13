@@ -49,6 +49,17 @@ std::unordered_map<std::string, std::string>& pending_by_session()
     return map;
 }
 
+void drop_pending_if_store_changed()
+{
+    const std::filesystem::path dir = session_store_dir();
+    std::lock_guard<std::mutex> lk(pending_mutex());
+    static std::filesystem::path seen;
+    if (dir == seen)
+        return;
+    pending_by_session().clear();
+    seen = dir;
+}
+
 std::filesystem::path pending_recall_path(const std::string& session_id)
 {
     namespace fs = std::filesystem;
@@ -755,6 +766,7 @@ MemoryRecallTelemetry memory_recall_enqueue_pending(
     const std::string& embed_model_hint)
 {
     MemoryRecallTelemetry tel;
+    drop_pending_if_store_changed();
     if (!pm::llm::has_feature(features, SMF::HybridRecallSearch) || session_id.empty())
         return tel;
 
@@ -821,6 +833,7 @@ MemoryRecallTelemetry memory_recall_enqueue_pending(
 
 std::optional<std::string> memory_recall_take_pending(const std::string& session_id)
 {
+    drop_pending_if_store_changed();
     if (session_id.empty())
         return std::nullopt;
 

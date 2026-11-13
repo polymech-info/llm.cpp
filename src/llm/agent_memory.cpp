@@ -6,13 +6,23 @@
 #include "llm_constants.hpp"
 #include "core/settings_store.hpp"
 #include "llm/chat_session_store.hpp"
+#include "logging/logger.h"
 #if !defined(PM_LEAN_SECURITY) && !defined(PM_ANDROID_CHAT)
 #include "llm/tools/run/run_capture.hpp"
+#endif
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
@@ -30,6 +40,37 @@
 #include "fs/path_sanitizer.hpp"
 
 namespace fs = std::filesystem;
+
+namespace media::llm::agent::detail {
+
+bool replace_file_preserving_destination(const fs::path& from, const fs::path& to)
+{
+#if defined(_WIN32)
+    if (MoveFileExW(from.c_str(), to.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        return true;
+    return false;
+#else
+    std::error_code ec;
+    fs::rename(from, to, ec);
+    return !ec;
+#endif
+}
+
+fs::path unique_sibling_temp(const fs::path& dest)
+{
+    static std::atomic<unsigned> seq{0};
+#if defined(_WIN32)
+    const unsigned pid = static_cast<unsigned>(GetCurrentProcessId());
+#else
+    const unsigned pid = static_cast<unsigned>(::getpid());
+#endif
+    fs::path tmp = dest;
+    tmp += "." + std::to_string(pid) + "." + std::to_string(seq.fetch_add(1)) + ".tmp";
+    return tmp;
+}
+
+} // namespace media::llm::agent::detail
 
 namespace media::llm::agent {
 
@@ -84,9 +125,12 @@ fs::path resolve_session_store_dir_unlocked() {
         return media::path::path_from_utf8(env);
     try {
         return media::settings::get_config_dir() / "sessions";
+    } catch (const std::exception& ex) {
+        logger::error(std::string("session store dir unavailable: ") + ex.what());
+        return {};
     } catch (...) {
-        // Last-ditch: relative to CWD (no roaming profile available).
-        return media::path::path_from_utf8("sessions");
+        logger::error("session store dir unavailable");
+        return {};
     }
 }
 
@@ -102,6 +146,8 @@ fs::path session_file_path_for(const std::string& sanitized_id) {
 }
 
 bool atomic_write_json(const fs::path& path, const nlohmann::json& j) {
+    if (path.empty() || !path.has_parent_path())
+        return false;
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
     // Some libcs set ec when the directory already exists. That must not skip the write.
@@ -113,12 +159,12 @@ bool atomic_write_json(const fs::path& path, const nlohmann::json& j) {
 #endif
         return false;
     }
-    ec.clear();
 
     // Open by byte string. ofstream(fs::path) was not creating session files
     // under the app files dir on Android, so the picker reloaded an empty stub.
+    const fs::path tmp = detail::unique_sibling_temp(path);
+    const std::string tmp_s = media::path::path_to_utf8(tmp);
     const std::string dest = media::path::path_to_utf8(path);
-    const std::string tmp_s = dest + ".tmp";
     try {
         std::ofstream o(tmp_s.c_str(), std::ios::binary | std::ios::trunc);
         if (!o.is_open()) {
@@ -135,29 +181,27 @@ bool atomic_write_json(const fs::path& path, const nlohmann::json& j) {
             __android_log_print(ANDROID_LOG_ERROR, "pm-chat",
                                 "session write flush failed errno=%d path=%s", errno, dest.c_str());
 #endif
+            std::error_code rm;
+            fs::remove(tmp, rm);
             return false;
         }
     } catch (...) {
 #if defined(__ANDROID__)
         __android_log_print(ANDROID_LOG_ERROR, "pm-chat", "session write threw path=%s", dest.c_str());
 #endif
+        std::error_code rm;
+        fs::remove(tmp, rm);
         return false;
     }
 
-    fs::rename(media::path::path_from_utf8(tmp_s), path, ec);
-    if (ec) {
-        // Windows rename-over-existing can fail with EACCES on some FS — fall
-        // back to remove + rename.
-        std::error_code rm_ec;
-        fs::remove(path, rm_ec);
-        fs::rename(media::path::path_from_utf8(tmp_s), path, ec);
-        if (ec) {
+    if (!detail::replace_file_preserving_destination(tmp, path)) {
 #if defined(__ANDROID__)
-            __android_log_print(ANDROID_LOG_ERROR, "pm-chat",
-                                "session rename failed %s path=%s", ec.message().c_str(), dest.c_str());
+        __android_log_print(ANDROID_LOG_ERROR, "pm-chat",
+                            "session rename failed path=%s", dest.c_str());
 #endif
-            return false;
-        }
+        std::error_code rm;
+        fs::remove(tmp, rm);
+        return false;
     }
 #if defined(__ANDROID__)
     __android_log_print(ANDROID_LOG_INFO, "pm-chat", "session wrote %s", dest.c_str());
@@ -213,20 +257,35 @@ void deserialize_session_task(const nlohmann::json& j, ScheduledTask& t) {
         t.events = j["events"].get<std::vector<nlohmann::json>>();
 }
 
-/// Persist a session entry to disk. Called while TaskStore mutex is held;
-/// disk I/O failure is silently swallowed (best-effort).
-void persist_session_locked(const ScheduledTask& t) {
-    if (t.id.empty()) return;
+/// Persist a session entry. Called while the TaskStore mutex is held.
+/// False means the in-memory record was not committed.
+bool persist_session_locked(const ScheduledTask& t) {
+    if (t.id.empty()) return false;
     const std::string fid = sanitize_session_id(t.id);
-    if (fid.empty()) return;
+    if (fid.empty()) return false;
     if (media::llm::chat_sessions::using_secure_storage()) {
+        nlohmann::json existing;
+        bool found = false;
         std::string err;
-        (void)media::llm::chat_sessions::save_session_memory_document(fid, serialize_session_task(t), err);
-        return;
+        // A bad signature or truncated document must stay on disk. Replacing it
+        // with an empty session would look like a valid load on the next turn.
+        if (!media::llm::chat_sessions::load_session_memory_document(fid, existing, found, err)) {
+            logger::error("session persist refused id=" + t.id + " " + err);
+            return false;
+        }
+        if (!media::llm::chat_sessions::save_session_memory_document(fid, serialize_session_task(t), err)) {
+            logger::error("session persist failed id=" + t.id + " " + err);
+            return false;
+        }
+        return true;
     }
     const fs::path path = session_file_path_for(fid);
-    (void) ensure_session_dir(path.parent_path());
-    (void) atomic_write_json(path, serialize_session_task(t));
+    if (!atomic_write_json(path, serialize_session_task(t))) {
+        logger::error("session persist failed id=" + t.id
+                      + " path=" + media::path::path_to_utf8(path));
+        return false;
+    }
+    return true;
 }
 
 /// Try to materialize a session from disk into the in-memory cache.
@@ -242,7 +301,11 @@ ScheduledTask* try_load_session_into_cache_locked(TaskStore& s, const std::strin
         nlohmann::json j;
         bool found = false;
         std::string err;
-        if (!media::llm::chat_sessions::load_session_memory_document(fid, j, found, err) || !found)
+        if (!media::llm::chat_sessions::load_session_memory_document(fid, j, found, err)) {
+            logger::error("session load failed id=" + id + " " + err);
+            return nullptr;
+        }
+        if (!found)
             return nullptr;
 
         ScheduledTask t;
@@ -313,7 +376,6 @@ static std::string tp_to_iso8601(const std::chrono::system_clock::time_point& tp
 }
 
 std::optional<std::chrono::system_clock::time_point> parse_iso8601(const std::string& s) {
-    // Accept "YYYY-MM-DDTHH:MM:SS[Z|+HH:MM|…]" — timezone part ignored (treated as UTC).
     if (s.size() < 19) return std::nullopt;
     std::tm tm{};
     std::istringstream ss(s.substr(0, 19));
@@ -326,7 +388,45 @@ std::optional<std::chrono::system_clock::time_point> parse_iso8601(const std::st
     std::time_t t = timegm(&tm);
 #endif
     if (t == static_cast<std::time_t>(-1)) return std::nullopt;
-    return std::chrono::system_clock::from_time_t(t);
+
+    std::size_t i = 19;
+    if (i < s.size() && s[i] == '.') {
+        ++i;
+        if (i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i])))
+            return std::nullopt;
+        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
+            ++i;
+    }
+    int offset_min = 0;
+    if (i < s.size()) {
+        if (s[i] == 'Z' || s[i] == 'z') {
+            if (i + 1 != s.size()) return std::nullopt;
+        } else if (s[i] == '+' || s[i] == '-') {
+            const int sign = s[i] == '-' ? -1 : 1;
+            ++i;
+            if (i + 2 > s.size() || !std::isdigit(static_cast<unsigned char>(s[i]))
+                || !std::isdigit(static_cast<unsigned char>(s[i + 1])))
+                return std::nullopt;
+            const int hh = (s[i] - '0') * 10 + (s[i + 1] - '0');
+            i += 2;
+            int mm = 0;
+            if (i < s.size() && s[i] == ':') ++i;
+            if (i < s.size()) {
+                if (i + 2 > s.size() || !std::isdigit(static_cast<unsigned char>(s[i]))
+                    || !std::isdigit(static_cast<unsigned char>(s[i + 1])))
+                    return std::nullopt;
+                mm = (s[i] - '0') * 10 + (s[i + 1] - '0');
+                i += 2;
+            }
+            if (i != s.size() || hh > 23 || mm > 59) return std::nullopt;
+            offset_min = sign * (hh * 60 + mm);
+        } else {
+            return std::nullopt;
+        }
+    }
+    auto tp = std::chrono::system_clock::from_time_t(t);
+    tp -= std::chrono::minutes(offset_min);
+    return tp;
 }
 
 // ── Serialization ────────────────────────────────────────────────────────────
@@ -671,9 +771,9 @@ bool task_store_write_memory(const std::string& task_id, const nlohmann::json& s
         else
             merge_memory_state(it->second.memory_state, state);
         it->second.updated_at   = now_iso8601();
-        persist_task_locked(it->second);
+        const bool saved = persist_task_locked(it->second);
         dump_debug_files_locked(s);
-        return true;
+        return saved;
     }
     // Session — fall through to disk if not cached.
     ScheduledTask* st = nullptr;
@@ -702,9 +802,9 @@ bool task_store_write_memory(const std::string& task_id, const nlohmann::json& s
     else
         merge_memory_state(st->memory_state, state);
     st->updated_at   = now_iso8601();
-    persist_session_locked(*st);
+    const bool saved = persist_session_locked(*st);
     dump_debug_files_locked(s);
-    return true;
+    return saved;
 }
 
 void task_store_append_event(const std::string& task_id, const nlohmann::json& event) {
@@ -768,8 +868,13 @@ std::string get_current_task_id() { return tl_current_task_id; }
 static std::string generate_unique_session_id(int seq) {
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count();
+#if defined(_WIN32)
+    const unsigned pid = static_cast<unsigned>(GetCurrentProcessId());
+#else
+    const unsigned pid = static_cast<unsigned>(::getpid());
+#endif
     std::ostringstream oss;
-    oss << "session-" << std::hex << ms << std::dec << '-' << seq;
+    oss << "session-" << std::hex << ms << std::dec << '-' << pid << '-' << seq;
     return oss.str();
 }
 
@@ -838,7 +943,27 @@ void session_load(const std::string& session_id,
     auto it = s.sessions.find(session_id);
     ScheduledTask* src = (it != s.sessions.end()) ? &it->second
                                                   : try_load_session_into_cache_locked(s, session_id);
-    if (!src) return;
+    if (!src) {
+        lk.unlock();
+        const nlohmann::json recovery = session_recover_from_journal(session_id);
+        const int promoted = recovery.is_object() ? recovery.value("recovered", 0) : 0;
+        if (promoted <= 0)
+            return;
+        lk.lock();
+        it = s.sessions.find(session_id);
+        src = (it != s.sessions.end()) ? &it->second
+                                       : try_load_session_into_cache_locked(s, session_id);
+        if (!src)
+            return;
+        out_memory_state = src->memory_state;
+        detail::sanitize_json_utf8_strings(out_memory_state);
+        const auto& evs = src->events;
+        const size_t start = (evs.size() > max_events) ? evs.size() - max_events : 0;
+        for (size_t i = start; i < evs.size(); ++i)
+            out_recent_events.push_back(evs[i]);
+        detail::sanitize_json_utf8_strings(out_recent_events);
+        return;
+    }
 
     out_memory_state = src->memory_state;
     detail::sanitize_json_utf8_strings(out_memory_state);
@@ -959,18 +1084,23 @@ void compact_journal_if_needed_unlocked(const fs::path& path) {
         return;
 
     const std::size_t drop = lines.size() - pm::llm::k_session_journal_max_entries;
-    const fs::path tmp = path;
-    fs::path tmp_path = tmp;
-    tmp_path += media::path::path_from_utf8(".tmp");
+    const fs::path tmp_path = detail::unique_sibling_temp(path);
     {
         std::ofstream out(tmp_path, std::ios::out | std::ios::trunc | std::ios::binary);
         if (!out) return;
         for (std::size_t i = drop; i < lines.size(); ++i)
             out << lines[i] << "\n";
+        out.flush();
+        if (!out) {
+            std::error_code rm;
+            fs::remove(tmp_path, rm);
+            return;
+        }
     }
-    std::error_code rec;
-    fs::rename(tmp_path, path, rec);
-    if (rec) fs::remove(tmp_path, rec);
+    if (!detail::replace_file_preserving_destination(tmp_path, path)) {
+        std::error_code rm;
+        fs::remove(tmp_path, rm);
+    }
 }
 
 } // namespace
@@ -1075,32 +1205,41 @@ nlohmann::json session_journal_read(const std::string& session_id) {
 std::filesystem::path session_store_dir() {
     std::lock_guard<std::mutex> lk(g_session_dir_mutex);
     const fs::path dir = resolve_session_store_dir_unlocked();
+    if (dir.empty())
+        return {};
     std::error_code ec;
     fs::create_directories(dir, ec);
     return dir;
 }
 
 void set_session_store_dir(const std::filesystem::path& dir) {
-    std::lock_guard<std::mutex> lk(g_session_dir_mutex);
+    auto& s = store();
+    std::lock_guard<std::mutex> store_lk(s.mutex);
+    std::lock_guard<std::mutex> dir_lk(g_session_dir_mutex);
     std::optional<fs::path> next;
     if (!dir.empty()) next = dir;
     if (next == g_session_dir_override) return;
     g_session_dir_override = std::move(next);
-    // Store mutex is not taken here. ensure_tasks_loaded compares this
-    // generation and reloads so a test directory swap cannot keep another
-    // profile's tasks in the map.
     g_schedule_generation.fetch_add(1, std::memory_order_relaxed);
+    s.tasks.clear();
+    s.tasks_loaded = false;
+    s.sessions.clear();
 }
 
 std::filesystem::path schedule_store_dir() {
     const fs::path sessions = session_store_dir();
+    if (sessions.empty())
+        return {};
     fs::path parent = sessions.parent_path();
     if (parent.empty())
-        parent = media::path::path_from_utf8(".");
+        return {};
     return parent / "schedules";
 }
 
 std::string sanitize_session_id(const std::string& id) {
+    if (id.empty())
+        return {};
+    bool rewritten = false;
     std::string out;
     out.reserve(id.size());
     for (unsigned char c : id) {
@@ -1108,27 +1247,51 @@ std::string sanitize_session_id(const std::string& id) {
             out.push_back(static_cast<char>(c));
         } else {
             out.push_back('_');
+            rewritten = true;
         }
     }
-    // Reject path-traversal — collapse leading dots and any ".." segments.
-    while (!out.empty() && out.front() == '.') out.erase(out.begin());
-    // Replace any literal ".." with "__".
+    while (!out.empty() && out.front() == '.') {
+        out.erase(out.begin());
+        rewritten = true;
+    }
     for (size_t i = 0; i + 1 < out.size(); ++i) {
         if (out[i] == '.' && out[i + 1] == '.') {
             out[i]     = '_';
             out[i + 1] = '_';
+            rewritten = true;
         }
     }
-    if (out.empty()) out = "session";
-    if (out.size() > 80) out.resize(80);
-    return out;
+    if (out.empty()) {
+        out = "id";
+        rewritten = true;
+    }
+    if (!rewritten && out.size() <= 80)
+        return out;
+    std::uint32_t hash = 2166136261u;
+    for (unsigned char c : id) {
+        hash ^= c;
+        hash *= 16777619u;
+    }
+    std::ostringstream suffix;
+    suffix << '_' << std::hex << std::setw(8) << std::setfill('0') << hash;
+    const std::string tail = suffix.str();
+    if (out.size() + tail.size() > 80)
+        out.resize(80 - tail.size());
+    return out + tail;
 }
 
 std::vector<std::string> session_list_persisted() {
     std::vector<std::string> out;
+    std::string err;
+    if (media::llm::chat_sessions::try_list_secure_memory_ids(out, err)) {
+        if (!err.empty())
+            logger::error("session list failed: " + err);
+        std::sort(out.begin(), out.end());
+        return out;
+    }
     const fs::path dir = session_store_dir();
     std::error_code ec;
-    if (!fs::exists(dir, ec)) return out;
+    if (dir.empty() || !fs::exists(dir, ec)) return out;
     for (const auto& entry : fs::directory_iterator(dir, ec)) {
         if (ec) break;
         if (!entry.is_regular_file(ec)) continue;
@@ -1152,28 +1315,44 @@ bool session_delete(const std::string& session_id) {
     }
 
     const std::string fid = sanitize_session_id(session_id);
-    if (!fid.empty()) {
-        if (media::llm::chat_sessions::using_secure_storage()) {
-            std::string err;
-            const bool removed_memory = media::llm::chat_sessions::delete_session_memory_document(fid, err);
-            err.clear();
-            const bool removed_journal = media::llm::chat_sessions::delete_session_log_document(fid, "journal", err);
-            return removed_memory || removed_journal || dropped;
+    if (fid.empty())
+        return false;
+    if (media::llm::chat_sessions::using_secure_storage()) {
+        std::string err;
+        const bool removed_memory = media::llm::chat_sessions::delete_session_memory_document(fid, err);
+        if (!removed_memory) {
+            logger::error("session delete memory failed id=" + session_id + " " + err);
+            return false;
         }
-        const fs::path path = session_file_path_for(fid);
-        const fs::path journal_path = session_journal_path_unlocked(session_id);
-        std::error_code ec;
-        const bool removed_session = fs::remove(path, ec);
-        bool removed_journal = false;
-        {
-            std::lock_guard<std::mutex> journal_lk(journal_mutex());
-            ec.clear();
-            removed_journal = fs::remove(journal_path, ec);
+        err.clear();
+        const bool removed_journal = media::llm::chat_sessions::delete_session_log_document(fid, "journal", err);
+        if (!removed_journal) {
+            logger::error("session delete journal failed id=" + session_id + " " + err);
+            return false;
         }
-        if (removed_session || removed_journal || dropped)
-            return true;
+        return true;
     }
-    return dropped;
+    const fs::path path = session_file_path_for(fid);
+    const fs::path journal_path = session_journal_path_unlocked(session_id);
+    std::error_code ec;
+    const bool session_existed = fs::exists(path, ec) && !ec;
+    ec.clear();
+    if (session_existed && !fs::remove(path, ec)) {
+        logger::error("session delete failed id=" + session_id + " " + ec.message());
+        return false;
+    }
+    bool journal_existed = false;
+    {
+        std::lock_guard<std::mutex> journal_lk(journal_mutex());
+        ec.clear();
+        journal_existed = fs::exists(journal_path, ec) && !ec;
+        ec.clear();
+        if (journal_existed && !fs::remove(journal_path, ec)) {
+            logger::error("session journal delete failed id=" + session_id + " " + ec.message());
+            return false;
+        }
+    }
+    return dropped || session_existed || journal_existed;
 }
 
 // ── Named session snapshots (P12) ────────────────────────────────────────────
@@ -1195,6 +1374,10 @@ bool session_snapshot_save(const std::string& session_id,
     if (session_id.empty() || snapshot_name.empty())
         return false;
 
+    nlohmann::json existing;
+    if (!session_read_memory_state(session_id, existing))
+        return false;
+
     nlohmann::json memory_state, recent_events;
     session_load(session_id, memory_state, recent_events, 20);
 
@@ -1206,7 +1389,17 @@ bool session_snapshot_save(const std::string& session_id,
     snap["recent_events"]     = recent_events;
 
     const std::string safe_name = sanitize_session_id(snapshot_name);
-    const fs::path    snap_path = snapshot_store_dir() / (safe_name + ".json");
+    if (safe_name.empty())
+        return false;
+    if (media::llm::chat_sessions::using_secure_storage()) {
+        std::string err;
+        if (!media::llm::chat_sessions::save_session_log_document("snapshots", safe_name, snap, err)) {
+            logger::error("snapshot save failed name=" + snapshot_name + " " + err);
+            return false;
+        }
+        return true;
+    }
+    const fs::path snap_path = snapshot_store_dir() / (safe_name + ".json");
     return atomic_write_json(snap_path, snap);
 }
 
@@ -1218,24 +1411,36 @@ bool session_snapshot_load(const std::string& snapshot_name,
         return false;
 
     const std::string safe_name = sanitize_session_id(snapshot_name);
-    const fs::path    snap_path = snapshot_store_dir() / (safe_name + ".json");
-
-    std::error_code ec;
-    if (!fs::exists(snap_path, ec))
+    if (safe_name.empty())
         return false;
 
-    try {
-        std::ifstream f(snap_path);
-        if (!f.is_open()) return false;
-        const nlohmann::json snap = nlohmann::json::parse(f);
-        if (snap.contains("memory_state") && snap["memory_state"].is_object())
-            out_memory_state = snap["memory_state"];
-        if (snap.contains("recent_events") && snap["recent_events"].is_array())
-            out_recent_events = snap["recent_events"];
-        return true;
-    } catch (...) {
-        return false;
+    nlohmann::json snap;
+    if (media::llm::chat_sessions::using_secure_storage()) {
+        bool found = false;
+        std::string err;
+        if (!media::llm::chat_sessions::load_session_log_document("snapshots", safe_name, snap, found, err)
+            || !found || !snap.is_object())
+            return false;
+    } else {
+        const fs::path snap_path = snapshot_store_dir() / (safe_name + ".json");
+        std::error_code ec;
+        if (!fs::exists(snap_path, ec))
+            return false;
+        try {
+            std::ifstream f(snap_path);
+            if (!f.is_open()) return false;
+            snap = nlohmann::json::parse(f);
+        } catch (...) {
+            return false;
+        }
     }
+    if (!snap.is_object() || !snap.contains("memory_state") || !snap["memory_state"].is_object())
+        return false;
+    out_memory_state = snap["memory_state"];
+    out_recent_events = (snap.contains("recent_events") && snap["recent_events"].is_array())
+        ? snap["recent_events"]
+        : nlohmann::json::array();
+    return true;
 }
 
 nlohmann::json scheduler_persistence_selftest() {

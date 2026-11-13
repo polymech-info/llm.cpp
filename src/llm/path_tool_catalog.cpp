@@ -117,13 +117,41 @@ ToolDef make_suspend_voice() {
 }
 
 ToolDef make_info_lookup() {
-    return ToolDef{
-        "info_lookup",
+#if defined(__ANDROID__)
+    const char* summary =
+        "Look up Tanit's phone tool list and MCP tool names. "
+        "Not a web search, and not a view of the selected files. "
+        "Selected files are already listed in the turn. "
+        "For MCP: kind=mcp, query=mcp lists servers; then request_tools the mcp_* name and CALL it.";
+    const nlohmann::json kind_enum = {"auto", "tool", "mcp", "all"};
+    const char* kind_desc =
+        "Surface to search. "
+        "auto or tool: the phone tool list. "
+        "mcp: MCP tools only (query=mcp lists them). "
+        "all: the same phone tool list. "
+        "Windows UI snapshot, installed apps, CLI commands, and skills are not on this device.";
+#else
+    const char* summary =
         "Look up Tanit's local catalog: CLI commands, in-app UI verbs (app_command), "
         "path tools, MCP tool names, apps, skills. "
         "Not a web search. A miss means the name is not in Tanit. "
         "For MCP: kind=mcp, query=mcp lists servers; then request_tools the mcp_* name and CALL it. "
-        "Do not use this to invent ribbon buttons.",
+        "Do not use this to invent ribbon buttons.";
+    const nlohmann::json kind_enum = {
+        "auto", "command", "app_command", "tool", "mcp", "app", "app_state", "skill", "resource", "all"};
+    const char* kind_desc =
+        "Surface to search. "
+        "auto: CLI and app commands first, then tools. "
+        "command: CLI slugs and in-app UI verbs. "
+        "app_command: in-app UI verbs only (run with the app_command tool). "
+        "mcp: MCP tools only (query=mcp lists them). "
+        "app: installed Windows applications. "
+        "app_state: live Tanit UI snapshot. "
+        "skill/resource: compact metadata; exact URI loads a body.";
+#endif
+    return ToolDef{
+        "info_lookup",
+        summary,
         nlohmann::json{
             {"type", "object"},
             {"properties", {
@@ -135,16 +163,8 @@ ToolDef make_info_lookup() {
                 }},
                 {"kind", {
                     {"type", "string"},
-                    {"enum", {"auto", "command", "app_command", "tool", "mcp", "app", "app_state", "skill", "resource", "all"}},
-                    {"description",
-                     "Surface to search. "
-                     "auto: CLI and app commands first, then tools. "
-                     "command: CLI slugs and in-app UI verbs. "
-                     "app_command: in-app UI verbs only (run with the app_command tool). "
-                     "mcp: MCP tools only (query=mcp lists them). "
-                     "app: installed Windows applications. "
-                     "app_state: live Tanit UI snapshot. "
-                     "skill/resource: compact metadata; exact URI loads a body."},
+                    {"enum", kind_enum},
+                    {"description", kind_desc},
                     {"default", "auto"},
                 }},
                 {"detail", {

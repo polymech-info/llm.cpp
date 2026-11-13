@@ -188,8 +188,9 @@ std::filesystem::path schedule_store_dir();
 /// Pass an empty path to clear the override and fall back to env/roaming.
 void set_session_store_dir(const std::filesystem::path& dir);
 
-/// Sanitize an external session id to a filename-safe form (a-z A-Z 0-9 _ - .).
-/// Capped at 80 characters; never returns empty. Rejects "..".
+/// Filename stem for a session id. Safe ids (alphanumerics, `_`, `-`, `.`,
+/// no `..`, at most 80 bytes) are unchanged. Empty returns empty. Any other id
+/// gets a hash suffix so distinct ids cannot share one file.
 std::string sanitize_session_id(const std::string& id);
 
 /// Names of every persisted session on disk (sorted). Returns sanitized ids
@@ -240,8 +241,8 @@ nlohmann::json task_to_summary_json(const ScheduledTask& t);
 /// Current UTC time as "YYYY-MM-DDTHH:MM:SSZ".
 std::string now_iso8601();
 
-/// Parse "YYYY-MM-DDTHH:MM:SS[Z]" (timezone ignored, treated as UTC).
-/// Returns nullopt on failure.
+/// Parse "YYYY-MM-DDTHH:MM:SS" with an optional fractional second and a `Z`
+/// or `±HH:MM` offset. A missing suffix is UTC. A malformed suffix is rejected.
 std::optional<std::chrono::system_clock::time_point> parse_iso8601(const std::string& s);
 
 } // namespace media::llm::agent

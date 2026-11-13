@@ -47,6 +47,11 @@ struct PruneResult {
 
 StoreOptions active_options();
 bool using_secure_storage();
+
+/// When secure storage is the session backend, fill `out` with memory-document
+/// ids and return true (an empty list is a successful listing). Return false
+/// when the file backend is active so the caller can scan the session directory.
+bool try_list_secure_memory_ids(std::vector<std::string>& out, std::string& err);
 std::filesystem::path store_dir();
 std::filesystem::path session_path(const std::string& id);
 

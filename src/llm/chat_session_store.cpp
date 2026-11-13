@@ -57,12 +57,11 @@ bool atomic_write_json(const std::filesystem::path& path, const nlohmann::json& 
 {
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) {
+    if (ec && !std::filesystem::is_directory(path.parent_path())) {
         err = ec.message();
         return false;
     }
-    std::filesystem::path tmp = path;
-    tmp += media::path::path_from_utf8(".tmp");
+    const std::filesystem::path tmp = media::llm::agent::detail::unique_sibling_temp(path);
     {
         std::ofstream f(tmp, std::ios::out | std::ios::binary | std::ios::trunc);
         if (!f) {
@@ -70,21 +69,17 @@ bool atomic_write_json(const std::filesystem::path& path, const nlohmann::json& 
             return false;
         }
         f << media::llm::agent::detail::safe_json_dump(j, 2);
+        f.flush();
         if (!f.good()) {
             err = "write tmp failed";
+            std::filesystem::remove(tmp, ec);
             return false;
         }
     }
-    ec.clear();
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        std::filesystem::remove(path, ec);
-        ec.clear();
-        std::filesystem::rename(tmp, path, ec);
-        if (ec) {
-            err = ec.message();
-            return false;
-        }
+    if (!media::llm::agent::detail::replace_file_preserving_destination(tmp, path)) {
+        err = "replace failed";
+        std::filesystem::remove(tmp, ec);
+        return false;
     }
     return true;
 }
@@ -559,6 +554,36 @@ StoreOptions active_options()
 bool using_secure_storage()
 {
     return active_options().backend == StoreBackend::SecureStorage;
+}
+
+bool try_list_secure_memory_ids(std::vector<std::string>& out, std::string& err)
+{
+    out.clear();
+    err.clear();
+    if (!using_secure_storage())
+        return false;
+#if defined(FEATURE_SECURE_STORAGE) && FEATURE_SECURE_STORAGE
+    const StoreOptions options = active_options();
+    const auto docs = pm::storage::list_documents(secure_paths(options));
+    if (!docs.ok) {
+        err = docs.error;
+        return true;
+    }
+    const std::string prefix = "pm://session-memory/";
+    for (const auto& meta : docs.items) {
+        if (meta.type != pm::model::ResourceType::SessionMemory)
+            continue;
+        if (meta.uri.rfind(prefix, 0) != 0)
+            continue;
+        const std::string id = meta.uri.substr(prefix.size());
+        if (!id.empty())
+            out.push_back(id);
+    }
+    return true;
+#else
+    err = "secure storage feature is disabled";
+    return true;
+#endif
 }
 
 std::filesystem::path store_dir()

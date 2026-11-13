@@ -227,12 +227,15 @@ inline constexpr std::size_t k_session_items_inject_chars = 4000;
 inline constexpr std::size_t k_session_items_inject_max   = 10;
 
 /// Last N conversation turn_pairs injected as "## Recent turns" (oldest first).
-/// Tight enough that "go" / "do it" can see the unfinished ask without
-/// turning ReplayTranscript back on.
+/// The user line and the assistant line are each two visual lines. Tool calls
+/// stay hints (name, status, one locator, recall handle). Bodies stay in the
+/// agent log and come back through memory_find.
 inline constexpr std::size_t k_recent_turns_inject_max    = 4;
-inline constexpr std::size_t k_recent_turns_user_chars    = 240;
-inline constexpr std::size_t k_recent_turns_asst_chars    = 280;
+inline constexpr std::size_t k_recent_turns_line_chars    = 96;
+inline constexpr std::size_t k_recent_turns_user_chars    = k_recent_turns_line_chars * 2;
+inline constexpr std::size_t k_recent_turns_asst_chars    = k_recent_turns_line_chars * 2;
 inline constexpr std::size_t k_recent_turns_inject_chars  = 2200;
+inline constexpr std::size_t k_recent_turns_hint_calls    = 2;
 
 /// Total UTF-8 chars injected into the agent system prompt for "Session Rules".
 inline constexpr std::size_t k_session_rules_inject_chars = 1500;

@@ -46,22 +46,28 @@ std::string truncate_inline(const std::string& s, std::size_t max_chars)
 std::string probe_file_artifact_staleness(const nlohmann::json& item)
 {
     if (!item.is_object()) return {};
-    const auto& kind = item.value("kind", std::string{});
+    const std::string kind = json_child_string(item, "kind");
     if (kind != "file") return {};
-    std::string path;
-    if (item.contains("locator") && item["locator"].is_object())
-        path = item["locator"].value("path", std::string{});
+    const std::string path = json_child_string(json_child_object(item, "locator"), "path");
     if (path.empty()) return {};
     namespace fs = std::filesystem;
     std::error_code ec;
     const fs::path fsp(path);
-    if (!fs::is_regular_file(fsp, ec) || ec)
-        return "missing";
-    const auto& meta = item.value("metadata", nlohmann::json::object());
+    if (!fs::is_regular_file(fsp, ec)) {
+        if (ec == std::errc::permission_denied)
+            return "permission";
+        if (ec == std::errc::no_such_file_or_directory)
+            return "missing";
+        std::error_code exists_ec;
+        if (!fs::exists(fsp, exists_ec) || exists_ec)
+            return exists_ec == std::errc::permission_denied ? "permission" : "missing";
+        return "unavailable";
+    }
+    const auto& meta = json_child_object(item, "metadata");
     if (meta.contains("size_bytes") && meta["size_bytes"].is_number()) {
         std::error_code sec;
         const auto sz = fs::file_size(fsp, sec);
-        if (!sec && static_cast<long long>(sz) != meta["size_bytes"].get<long long>())
+        if (!sec && static_cast<long long>(sz) != json_child_int64(meta, "size_bytes"))
             return "resized";
     }
     if (meta.contains("mtime_epoch") && meta["mtime_epoch"].is_number()) {
@@ -71,7 +77,7 @@ std::string probe_file_artifact_staleness(const nlohmann::json& item)
             const auto sys_t = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
                 mt - decltype(mt)::clock::now() + std::chrono::system_clock::now());
             const auto secs = std::chrono::duration_cast<std::chrono::seconds>(sys_t.time_since_epoch()).count();
-            const long long stamped = meta["mtime_epoch"].get<long long>();
+            const long long stamped = json_child_int64(meta, "mtime_epoch");
             if (secs > stamped + 1 || secs < stamped - 1)  // 1-sec slop for FAT
                 return "modified";
         }
@@ -83,8 +89,8 @@ void append_one_session_item(std::ostringstream& s, const std::string& id, const
 {
     if (!item.is_object()) return;
     s << "- " << id
-      << ": kind=" << item.value("kind", std::string{"unknown"});
-    const std::string role = item.value("role", std::string{});
+      << ": kind=" << json_child_string(item, "kind", "unknown");
+    const std::string role = json_child_string(item, "role");
     if (!role.empty() && role != "unknown")
         s << " role=" << role;
     if (item.contains("locator") && item["locator"].is_object()) {
@@ -110,14 +116,14 @@ void append_one_session_item(std::ostringstream& s, const std::string& id, const
             s << " count=" << m["count"].dump();
         if (m.contains("source_pattern") && m["source_pattern"].is_string())
             s << " source_pattern=" << m["source_pattern"].get<std::string>();
-        if (item.value("kind", std::string{}) == "tool_checkpoint") {
+        if (json_child_string(item, "kind") == "tool_checkpoint") {
             if (m.contains("exit_code"))
                 s << " exit_code=" << m["exit_code"].dump();
             if (m.contains("command") && m["command"].is_string())
                 s << " command="
                   << truncate_inline(m["command"].get<std::string>(), 120);
         }
-        if (m.value("body_available", false)) {
+        if (json_child_bool(m, "body_available")) {
             s << " body_available=true";
             if (m.contains("assistant_chars"))
                 s << " assistant_chars=" << m["assistant_chars"].dump();
@@ -126,11 +132,11 @@ void append_one_session_item(std::ostringstream& s, const std::string& id, const
             bool first = true;
             for (const auto& call : m["tool_calls"]) {
                 if (!call.is_object() ||
-                    !call.value("payload_available", false) ||
-                    call.value("payload_denied", false))
+                    !json_child_bool(call, "payload_available") ||
+                    json_child_bool(call, "payload_denied"))
                     continue;
-                const std::string call_id = call.value("id", std::string{});
-                const std::string name = call.value("name", std::string{});
+                const std::string call_id = json_child_string(call, "id");
+                const std::string name = json_child_string(call, "name");
                 if (call_id.empty()) continue;
                 s << (first ? " payload_calls=" : ",");
                 if (!name.empty()) s << name << ":";
@@ -142,15 +148,15 @@ void append_one_session_item(std::ostringstream& s, const std::string& id, const
                 first = false;
             }
         }
-        if (m.value("payload_available", false) &&
-            !m.value("payload_denied", false) &&
+        if (json_child_bool(m, "payload_available") &&
+            !json_child_bool(m, "payload_denied") &&
             m.contains("transcript_tool_call_id") &&
             m["transcript_tool_call_id"].is_string()) {
             s << " payload_call_id="
               << m["transcript_tool_call_id"].get<std::string>();
             if (item.contains("origin") && item["origin"].is_object()) {
                 const std::string tool_name =
-                    item["origin"].value("tool_name", std::string{});
+                    json_child_string(item["origin"], "tool_name");
                 if (!tool_name.empty()) s << " payload_tool=" << tool_name;
             }
         }
@@ -174,8 +180,8 @@ std::vector<std::pair<std::string, const nlohmann::json*>> sort_items_newest_fir
     out.reserve(rows.size());
     for (auto it = rows.begin(); it != rows.end(); ++it) {
         if (it.value().is_object()) {
-            const std::string kind = it.value().value("kind", std::string{});
-            const std::string role = it.value().value("role", std::string{});
+            const std::string kind = json_child_string(it.value(), "kind");
+            const std::string role = json_child_string(it.value(), "role");
             // Internal bookkeeping is useful in logs but should not displace
             // file/media locators and turn pairs from the small live prompt.
             if (kind == "self_check" || role == "security_review" || role == "security_decision")
@@ -204,7 +210,7 @@ std::vector<std::pair<std::string, const nlohmann::json*>> sort_items_newest_fir
 std::string format_stored_literal(const nlohmann::json& value)
 {
     if (value.is_string())
-        return value.get<std::string>();
+        return media::str_san::utf8_safe_ellipsize(value.get<std::string>(), 160, "\u2026");
     if (!value.is_array() || value.empty())
         return {};
     std::string out;
@@ -213,8 +219,8 @@ std::string format_stored_literal(const nlohmann::json& value)
         if (entry.is_string())
             piece = entry.get<std::string>();
         else if (entry.is_object()) {
-            const std::string name = entry.value("name", std::string{});
-            const std::string exe  = entry.value("exe", std::string{});
+            const std::string name = json_child_string(entry, "name");
+            const std::string exe  = json_child_string(entry, "exe");
             if (!name.empty() && !exe.empty())
                 piece = name + ":" + exe;
             else
@@ -251,22 +257,21 @@ void append_session_items(std::ostringstream& s,
     for (auto it = rows.begin(); it != rows.end(); ++it) {
         if (it.value().is_object() && it.value().contains("metadata") &&
             it.value()["metadata"].is_object() &&
-            it.value()["metadata"].value("body_available", false)) {
+            json_child_bool(it.value()["metadata"], "body_available")) {
             has_retrievable_body = true;
         }
         if (it.value().is_object() && it.value().contains("metadata") &&
             it.value()["metadata"].is_object()) {
             const auto& metadata = it.value()["metadata"];
-            if (metadata.value("payload_available", false) &&
-                !metadata.value("payload_denied", false))
+            if (json_child_bool(metadata, "payload_available") &&
+                !json_child_bool(metadata, "payload_denied"))
                 has_retrievable_payload = true;
-            const auto& calls = metadata.value(
-                "tool_calls", nlohmann::json::array());
-            if (calls.is_array()) {
+            const auto calls = json_child_array(metadata, "tool_calls");
+            if (!calls.empty()) {
                 for (const auto& call : calls) {
                     if (call.is_object() &&
-                        call.value("payload_available", false) &&
-                        !call.value("payload_denied", false)) {
+                        json_child_bool(call, "payload_available") &&
+                        !json_child_bool(call, "payload_denied")) {
                         has_retrievable_payload = true;
                         break;
                     }
@@ -297,7 +302,7 @@ void append_session_items(std::ostringstream& s,
         const std::string ln = line.str();
         if (block.tellp() > 0 && static_cast<std::size_t>(block.tellp()) + ln.size() > chars_budget) {
             truncated = true;
-            break;
+            continue;
         }
         block << ln;
         ++shown;
@@ -309,25 +314,56 @@ void append_session_items(std::ostringstream& s,
     s << block.str();
 }
 
+namespace {
+
+/// Newlines become spaces so a prompt or reply occupies at most two lines.
+std::string recent_turn_text(std::string text, std::size_t max_chars)
+{
+    std::string flat;
+    flat.reserve(text.size());
+    bool pending_space = false;
+    for (unsigned char c : text) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            pending_space = !flat.empty();
+            continue;
+        }
+        if (pending_space) {
+            flat.push_back(' ');
+            pending_space = false;
+        }
+        flat.push_back(static_cast<char>(c));
+    }
+    return media::str_san::utf8_safe_ellipsize(std::move(flat), max_chars, "\u2026");
+}
+
+} // namespace
+
 void append_recent_turns(std::ostringstream& s,
                          const nlohmann::json& memory_state,
-                         std::size_t max_turns)
+                         std::size_t max_turns,
+                         bool advertise_body_recall)
 {
     if (max_turns == 0) max_turns = pm::llm::k_recent_turns_inject_max;
     if (!memory_state.is_object() || !memory_state.contains("items") ||
         !memory_state["items"].is_object() || max_turns == 0)
         return;
 
-    const auto sorted = sort_items_newest_first(memory_state["items"]);
     std::vector<std::pair<std::string, const nlohmann::json*>> pairs;
-    pairs.reserve(max_turns);
-    for (const auto& row : sorted) {
-        if (row.second->value("role", std::string{}) != "turn_pair")
+    for (auto it = memory_state["items"].begin(); it != memory_state["items"].end(); ++it) {
+        if (!it.value().is_object())
             continue;
-        pairs.push_back(row);
-        if (pairs.size() >= max_turns)
-            break;
+        if (json_child_string(it.value(), "role") != "turn_pair")
+            continue;
+        pairs.emplace_back(it.key(), &it.value());
     }
+    std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) {
+        const std::string ca = json_child_string(*a.second, "created_at");
+        const std::string cb = json_child_string(*b.second, "created_at");
+        if (ca != cb) return ca > cb;
+        return a.first > b.first;
+    });
+    if (pairs.size() > max_turns)
+        pairs.resize(max_turns);
     if (pairs.empty())
         return;
 
@@ -338,22 +374,16 @@ void append_recent_turns(std::ostringstream& s,
         const auto& item = *row.second;
         const auto& meta = item.contains("metadata") && item["metadata"].is_object()
             ? item["metadata"] : item;
-        std::string user = meta.value("user", std::string{});
-        std::string asst = meta.value("assistant", std::string{});
+        std::string user = json_child_string(meta, "user");
+        std::string asst = json_child_string(meta, "assistant");
         if (user.empty() && asst.empty() && item.contains("summary") && item["summary"].is_string())
             user = item["summary"].get<std::string>();
-        user = media::str_san::utf8_safe_ellipsize(user, pm::llm::k_recent_turns_user_chars, "\u2026");
-        asst = media::str_san::utf8_safe_ellipsize(asst, pm::llm::k_recent_turns_asst_chars, "\u2026");
+        user = recent_turn_text(std::move(user), pm::llm::k_recent_turns_user_chars);
+        asst = recent_turn_text(std::move(asst), pm::llm::k_recent_turns_asst_chars);
 
-        std::string tools;
-        const auto& tools_j = meta.contains("tools") ? meta["tools"] : nlohmann::json();
-        if (tools_j.is_array()) {
-            for (const auto& tn : tools_j) {
-                if (!tn.is_string()) continue;
-                if (!tools.empty()) tools += ", ";
-                tools += tn.get<std::string>();
-            }
-        }
+        const nlohmann::json* calls = nullptr;
+        if (meta.contains("tool_calls") && meta["tool_calls"].is_array())
+            calls = &meta["tool_calls"];
 
         std::string line;
         if (!row.first.empty())
@@ -362,51 +392,72 @@ void append_recent_turns(std::ostringstream& s,
             line += "User: \u201c" + user + "\u201d\n";
         else if (!row.first.empty())
             line += "\n";
-        if (!tools.empty())
-            line += "  \u2192 tools: " + tools + "\n";
         if (!asst.empty())
-            line += "  \u2192 Assistant: \u201c" + asst + "\u201d\n";
+            line += "  Assistant: \u201c" + asst + "\u201d\n";
+        if (json_child_bool(meta, "body_available"))
+            line += "  body_available=true\n";
 
-        const nlohmann::json* calls = nullptr;
-        if (meta.contains("tool_calls") && meta["tool_calls"].is_array())
-            calls = &meta["tool_calls"];
+        std::size_t shown_calls = 0;
+        std::size_t hidden_calls = 0;
         if (calls) {
             for (const auto& call : *calls) {
                 if (!call.is_object())
                     continue;
-                const std::string name = call.value("name", std::string{});
-                const std::string id   = call.value("id", std::string{});
+                const std::string name = json_child_string(call, "name");
+                const std::string id   = json_child_string(call, "id");
                 if (name.empty() && id.empty())
                     continue;
-                line += "  \u2192 call: " + name;
-                if (!id.empty())
-                    line += " id=" + id;
-                if (call.contains("payload_available"))
-                    line += call.value("payload_available", false)
+                if (shown_calls >= pm::llm::k_recent_turns_hint_calls) {
+                    ++hidden_calls;
+                    continue;
+                }
+                ++shown_calls;
+                const std::string status = json_child_string(call, "status");
+                line += "  " + name;
+                if (!status.empty())
+                    line += " " + status;
+                if (call.contains("payload_available") && call["payload_available"].is_boolean())
+                    line += json_child_bool(call, "payload_available")
                         ? " payload_available=true" : " payload_available=false";
-                for (const char* key : {"query", "command", "path", "apps", "input_files", "output_files"}) {
+                for (const char* key : {"query", "command", "path", "output_files", "input_files"}) {
                     if (!call.contains(key))
                         continue;
                     const std::string literal = format_stored_literal(call[key]);
                     if (literal.empty())
                         continue;
                     line += std::string(" ") + key + "=" + literal;
+                    break;
                 }
                 line += "\n";
-                if (call.value("payload_available", false) &&
-                    !call.value("payload_denied", false) &&
+                if (json_child_bool(call, "payload_available") &&
+                    !json_child_bool(call, "payload_denied") &&
                     !id.empty() && !row.first.empty()) {
-                    line += "  \u2192 recover: memory_find(itemId=" + row.first
+                    line += "  memory_find(itemId=" + row.first
                         + ", toolCallId=" + id + ", includePayload=true)\n";
                 }
             }
+        }
+        if (hidden_calls > 0)
+            line += "  \u2026 " + std::to_string(hidden_calls) + " more calls\n";
+        if (shown_calls == 0) {
+            std::string tools;
+            const auto& tools_j = meta.contains("tools") ? meta["tools"] : nlohmann::json();
+            if (tools_j.is_array()) {
+                for (const auto& tn : tools_j) {
+                    if (!tn.is_string()) continue;
+                    if (!tools.empty()) tools += ", ";
+                    tools += tn.get<std::string>();
+                }
+            }
+            if (!tools.empty())
+                line += "  tools: " + tools + "\n";
         }
         if (meta.contains("proposed") && meta["proposed"].is_object() && !meta["proposed"].empty()) {
             const auto& proposed = meta["proposed"];
             std::string proposed_line = "  \u2192 proposed:";
             bool any = false;
             for (const char* field : {"intent", "action", "subject"}) {
-                const std::string v = proposed.value(field, std::string{});
+                const std::string v = json_child_string(proposed, field);
                 if (v.empty())
                     continue;
                 proposed_line += std::string(" ") + field + "=" + v;
@@ -417,7 +468,10 @@ void append_recent_turns(std::ostringstream& s,
         }
         if (line.empty())
             continue;
-        if (!lines.empty() && total_chars + line.size() > pm::llm::k_recent_turns_inject_chars)
+        constexpr std::size_t k_recent_turn_record_chars = 520;
+        if (line.size() > k_recent_turn_record_chars)
+            line = media::str_san::utf8_safe_ellipsize(line, k_recent_turn_record_chars, "\u2026\n");
+        if (total_chars + line.size() > pm::llm::k_recent_turns_inject_chars)
             break;
         total_chars += line.size();
         lines.push_back(std::move(line));
@@ -430,8 +484,11 @@ void append_recent_turns(std::ostringstream& s,
     std::reverse(lines.begin(), lines.end());
 
     s << "\n## Recent turns\n"
-         "Last conversation turns (oldest first). Continue the latest unfinished ask. "
-         "If a turn is truncated, recover it with memory_find(itemId=<id>, includeBody=true).\n";
+         "Last conversation turns (oldest first). User and assistant are two lines each. "
+         "Tool lines are hints, not results. Continue the latest unfinished ask.";
+    if (advertise_body_recall)
+        s << " Recover a truncated reply with memory_find(itemId=<turn id>, includeBody=true).";
+    s << "\n";
     for (const auto& line : lines)
         s << line;
 }
@@ -454,10 +511,10 @@ void append_relevant_session_rules_impl(std::ostringstream& s,
     for (auto it = rules.begin(); it != rules.end(); ++it) {
         if (!it.value().is_object()) continue;
         const auto& r = it.value();
-        if (!r.value("active", true)) continue;
-        const std::string text = r.value("text", std::string{});
+        if (r.contains("active") && !json_child_bool(r, "active", true)) continue;
+        const std::string text = json_child_string(r, "text");
         if (text.empty()) continue;
-        const std::string priority = r.value("priority", std::string{"hint"});
+        const std::string priority = json_child_string(r, "priority", "hint");
         if (priority == "hard") hard.push_back(text);
         else if (priority == "preference") preferences.push_back(text);
         else hints.push_back(text);
@@ -533,7 +590,9 @@ void append_agent_tooling_and_context(std::ostringstream& s,
                                       const Turn&         turn,
                                       const nlohmann::json& tools,
                                       bool emit_identity,
-                                      bool emit_context)
+                                      bool emit_selection,
+                                      bool emit_open_files,
+                                      bool emit_folder)
 {
     std::unordered_set<std::string> enabled_tools;
     for (const auto& t : tools) {
@@ -571,56 +630,60 @@ void append_agent_tooling_and_context(std::ostringstream& s,
         return;
     }
 
-    // Selection / folder / open-tab paths only when system-prompt.md did not
-    // already inject them via ${FOLDER} / ${CURRENT_SELECTION} / ${CURRENT_OPEN_FILES}.
-    if (emit_context) {
-        if (!turn.selection.empty()) {
-            s << "Selected files (" << turn.selection.size() << "):\n";
-            for (std::size_t i = 0; i < turn.selection.size(); ++i)
-                s << "  [" << i << "] " << format_path_with_stats(turn.selection[i]) << "\n";
-            s << "Use these paths in tool calls unless the user names a different path.\n\n";
+    // Each block is skipped only when system-prompt.md already substitutes that
+    // placeholder. Editor caret has no placeholder, so it stays here.
+    if (emit_selection && !turn.selection.empty()) {
+        s << "Selected files (" << turn.selection.size() << "):\n";
+        for (std::size_t i = 0; i < turn.selection.size(); ++i)
+            s << "  [" << i << "] " << format_path_with_stats(turn.selection[i]) << "\n";
+        s << "Use these paths in tool calls unless the user names a different path.\n\n";
+    }
+    if (emit_open_files && !turn.open_files.empty()) {
+        s << "Open files (" << turn.open_files.size() << "):\n";
+        for (std::size_t i = 0; i < turn.open_files.size(); ++i)
+            s << "  [" << i << "] " << format_path_with_stats(turn.open_files[i]) << "\n";
+        s << "These are files open in viewer tabs; they may differ from the current file-panel selection.\n\n";
+    }
+    if (!turn.editor_path.empty() && turn.editor_line > 0) {
+        s << "Editor caret: " << turn.editor_path << ':' << turn.editor_line
+          << ':' << turn.editor_column;
+        const bool ranged =
+            turn.editor_sel_start_line > 0
+            && (turn.editor_sel_start_line != turn.editor_sel_end_line
+                || turn.editor_sel_start_col != turn.editor_sel_end_col);
+        if (ranged) {
+            s << " sel " << turn.editor_sel_start_line << ':' << turn.editor_sel_start_col
+              << '-' << turn.editor_sel_end_line << ':' << turn.editor_sel_end_col;
         }
-        if (!turn.open_files.empty()) {
-            s << "Open files (" << turn.open_files.size() << "):\n";
-            for (std::size_t i = 0; i < turn.open_files.size(); ++i)
-                s << "  [" << i << "] " << format_path_with_stats(turn.open_files[i]) << "\n";
-            s << "These are files open in viewer tabs; they may differ from the current file-panel selection.\n\n";
+        s << "\n";
+        if (!turn.editor_selected_text.empty()) {
+            s << "Inner selection (" << turn.editor_selected_text.size() << " chars): "
+              << media::str_san::utf8_safe_ellipsize(turn.editor_selected_text, 400)
+              << "\n";
         }
-        if (!turn.editor_path.empty() && turn.editor_line > 0) {
-            s << "Editor caret: " << turn.editor_path << ':' << turn.editor_line
-              << ':' << turn.editor_column;
-            const bool ranged =
-                turn.editor_sel_start_line > 0
-                && (turn.editor_sel_start_line != turn.editor_sel_end_line
-                    || turn.editor_sel_start_col != turn.editor_sel_end_col);
-            if (ranged) {
-                s << " sel " << turn.editor_sel_start_line << ':' << turn.editor_sel_start_col
-                  << '-' << turn.editor_sel_end_line << ':' << turn.editor_sel_end_col;
-            }
-            s << "\n";
-            if (!turn.editor_selected_text.empty()) {
-                s << "Inner selection (" << turn.editor_selected_text.size() << " chars): "
-                  << media::str_san::utf8_safe_ellipsize(turn.editor_selected_text, 400)
-                  << "\n";
-            }
-            s << "Prefer this caret / selection as the edit window when the user says "
-                 "\"here\", \"this\", or does not name a heading.\n\n";
-        }
-        if (turn.selection.empty() && turn.open_files.empty()) {
-            if (!turn.folder_hint.empty()) {
-                s << "Working folder: " << turn.folder_hint
-                  << " (no file selection). Use this exact path in tool calls; invented paths will fail.\n\n";
-            } else {
-                s << "No active selection, no open viewer files, and no current folder. "
-                     "If the user refers to files without naming them, ask which folder or files to work on.\n\n";
-            }
+        s << "Prefer this caret / selection as the edit window when the user says "
+             "\"here\", \"this\", or does not name a heading.\n\n";
+    }
+    if (emit_folder && turn.selection.empty() && turn.open_files.empty()) {
+        if (!turn.folder_hint.empty()) {
+            s << "Working folder: " << turn.folder_hint
+              << " (no file selection). Use this exact path in tool calls; invented paths will fail.\n\n";
+        } else if (emit_selection && emit_open_files) {
+            s << "No active selection, no open viewer files, and no current folder. "
+                 "If the user refers to files without naming them, ask which folder or files to work on.\n\n";
         }
     }
 
     // Hard rules only — gated on the tools actually seeded for this turn.
     s << "## Guidelines:\n"
+#if defined(__ANDROID__)
+         "  - Relative path strings resolve against the app data folder, "
+         "or the parent of the first selected file. "
+         "Use the selected files listed above. Invented paths will fail.\n"
+#else
          "  - Relative path strings resolve against the current file-panel folder "
          "(last-used explorer, or the parent of the first selected file). Invented paths will fail.\n"
+#endif
          "  - Call the tool — do not narrate what you would do. "
          "If a tool reports per-file failures, state them briefly once.\n";
 
@@ -694,29 +757,33 @@ static std::string build_system_prompt_impl(const Turn& turn,
     }
 
     std::ostringstream s;
-    bool has_memory_tools = false;
+    bool has_memory_read = false;
+    bool has_memory_write = false;
+    bool has_memory_find = false;
     if (tools.is_array()) {
         for (const auto& t : tools) {
             if (!t.contains("function") || !t["function"].is_object()) continue;
-            std::string nm = t["function"].value("name", std::string{});
+            std::string nm = json_child_string(t["function"], "name");
             nm = media::strutil::lower_ascii(nm);
-            if (nm == "memory_read" || nm == "memory_write" || nm == "memory_append_event") {
-                has_memory_tools = true;
-                break;
-            }
+            if (nm == "memory_read") has_memory_read = true;
+            else if (nm == "memory_write") has_memory_write = true;
+            else if (nm == "memory_find") has_memory_find = true;
         }
     }
+    const bool has_memory_tools = has_memory_read || has_memory_write;
 
     if (!external.empty())
         s << external << "\n\n---\n\n";
 
     append_runtime_environment_context(s);
-    // When the file provides identity + folder/selection via ${VARS}, skip the
-    // duplicate C++ sections. Executor hard-rules still follow (gated on tools).
-    const bool file_provides_context = !external.empty();
+    const auto prompt_has = [&](const char* token) {
+        return system_prompt_file.content.find(token) != std::string::npos;
+    };
     append_agent_tooling_and_context(s, turn, tools,
-        /*emit_identity=*/!file_provides_context,
-        /*emit_context=*/ !file_provides_context);
+        /*emit_identity=*/external.empty(),
+        /*emit_selection=*/!prompt_has("${CURRENT_SELECTION}"),
+        /*emit_open_files=*/!prompt_has("${CURRENT_OPEN_FILES}"),
+        /*emit_folder=*/!prompt_has("${FOLDER}"));
 
     // ── P1: planner intent-context block ─────────────────────────────────────
     // Emitted whenever the planner produced at least one intent-context field,
@@ -804,7 +871,7 @@ static std::string build_system_prompt_impl(const Turn& turn,
                  "  - Use tools for actual capture/read/write actions.\n"
                  "  - Do not ask the user to manually trigger the next tick.\n"
                  "  - Do not say you will wait; the scheduler will call you again.\n";
-            if (has_memory_tools)
+            if (has_memory_write)
                 s << "  - Update memory via memory_write after meaningful state changes.\n";
         } else {
             // ── Session memory context (cross-turn chat persistence) ─────────
@@ -815,7 +882,7 @@ static std::string build_system_prompt_impl(const Turn& turn,
             // already carries the same text at larger budgets.
             if (pm::llm::has_feature(turn.structured_memory_features, SMF::InjectItems)
                 && !replay_transcript)
-                append_recent_turns(s, turn.memory_state);
+                append_recent_turns(s, turn.memory_state, 0, has_memory_find);
             if (pm::llm::has_feature(turn.structured_memory_features, SMF::InjectItems))
                 append_session_items(s, turn.memory_state);
             if (pm::llm::has_feature(turn.structured_memory_features, SMF::InjectRules))
@@ -824,14 +891,15 @@ static std::string build_system_prompt_impl(const Turn& turn,
                 && !turn.pending_recall_inject.empty())
                 append_pending_recall(s, turn.pending_recall_inject);
             if (replay_transcript && turn.recent_events.is_array() && !turn.recent_events.empty()) {
-                s << "\n## Conversation History\n"
-                     "Past turns in this session (oldest first):\n";
+                std::vector<std::string> kept;
                 std::size_t total_chars = 0;
-                for (const auto& ev : turn.recent_events) {
+                bool omitted = false;
+                for (auto it = turn.recent_events.rbegin(); it != turn.recent_events.rend(); ++it) {
+                    const auto& ev = *it;
                     if (!ev.is_object()) continue;
-                    const std::string ts   = ev.value("ts",        std::string{});
-                    std::string       user = ev.value("user",      std::string{});
-                    std::string       asst = ev.value("assistant", std::string{});
+                    const std::string ts   = json_child_string(ev, "ts");
+                    std::string       user = json_child_string(ev, "user");
+                    std::string       asst = json_child_string(ev, "assistant");
 
                     std::string tool_line;
                     if (ev.contains("tools") && ev["tools"].is_array()) {
@@ -871,22 +939,53 @@ static std::string build_system_prompt_impl(const Turn& turn,
                         line += "\n  \u2192 Assistant: \u201c" + asst + "\u201d";
                     line += "\n";
 
-                    total_chars += line.size();
-                    if (total_chars > pm::llm::k_session_memory_inject_chars) {
-                        s << "  [\u2026 earlier turns omitted to fit context \u2026]\n";
+                    if (total_chars + line.size() > pm::llm::k_session_memory_inject_chars) {
+                        omitted = true;
+                        if (kept.empty())
+                            kept.push_back(media::str_san::utf8_safe_ellipsize(
+                                line, pm::llm::k_session_memory_inject_chars, "\u2026\n"));
                         break;
                     }
+                    total_chars += line.size();
+                    kept.push_back(std::move(line));
+                }
+                std::reverse(kept.begin(), kept.end());
+                s << "\n## Conversation History\n"
+                     "Past turns in this session (oldest first):\n";
+                if (omitted)
+                    s << "  [\u2026 earlier turns omitted to fit context \u2026]\n";
+                for (const auto& line : kept)
                     s << line;
+            }
+            if (turn.memory_state.is_object() && !turn.memory_state.empty()) {
+                if (!has_structured_session_memory(turn.memory_state)) {
+                    s << "\n## Stored Memory\n"
+                         "Facts you have explicitly saved with memory_write:\n"
+                      << safe_json_dump(turn.memory_state, 2) << "\n";
+                } else {
+                    nlohmann::json extras = nlohmann::json::object();
+                    for (auto it = turn.memory_state.begin(); it != turn.memory_state.end(); ++it) {
+                        if (it.key() == "items" || it.key() == "artifacts"
+                            || it.key() == "instructions" || it.key() == "journal_recovery")
+                            continue;
+                        extras[it.key()] = it.value();
+                    }
+                    if (!extras.empty()) {
+                        s << "\n## Stored Memory\n"
+                             "Explicit facts saved beside structured session items:\n"
+                          << media::str_san::utf8_safe_ellipsize(safe_json_dump(extras, 2), 800, "\u2026")
+                          << "\n";
+                    }
                 }
             }
-            if (turn.memory_state.is_object() && !turn.memory_state.empty() && !has_structured_session_memory(turn.memory_state))
-                s << "\n## Stored Memory\n"
-                     "Facts you have explicitly saved with memory_write:\n"
-                  << safe_json_dump(turn.memory_state, 2) << "\n";
             if (has_memory_tools) {
-                s << "\nUse `memory_write` to persist facts across turns (user name, preferences, "
-                     "secrets, notes). Use `memory_read` to retrieve them. Memory persists for the "
-                     "lifetime of this chat session.\n";
+                s << "\n";
+                if (has_memory_write)
+                    s << "Use `memory_write` to persist facts across turns (user name, preferences, "
+                         "secrets, notes). ";
+                if (has_memory_read)
+                    s << "Use `memory_read` to retrieve them. ";
+                s << "Memory persists for the lifetime of this chat session.\n";
             }
         }
     }

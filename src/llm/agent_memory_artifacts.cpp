@@ -2177,7 +2177,7 @@ nlohmann::json session_recover_from_journal(const std::string& session_id,
 
     nlohmann::json existing_state = nlohmann::json::object();
     if (!session_read_memory_state(session_id, existing_state))
-        return nlohmann::json::object();
+        existing_state = nlohmann::json::object();
 
     const bool truncate_summaries = pm::llm::has_feature(features, SMF::TruncateSummaries);
     const auto recovered_ids = collect_recovered_call_ids(existing_state);

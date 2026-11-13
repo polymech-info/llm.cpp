@@ -1547,9 +1547,9 @@ namespace {
 nlohmann::json paths_array_schema() {
     return nlohmann::json{
         {"type", "array"},
-        {"description", "Host file paths (absolute, or relative to the current Explorer folder "
-                         "in-app; else process cwd). When the user says 'these files' without "
-                         "naming any, the agent passes the current Explorer selection (or folder)."},
+        {"description", "Host file paths (absolute, or relative to the current folder). "
+                         "When the user does not name a path, use the selected files "
+                         "already listed in this turn."},
         {"items", {{"type", "string"}}},
         {"minItems", 1},
     };

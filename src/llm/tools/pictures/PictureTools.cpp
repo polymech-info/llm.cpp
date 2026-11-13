@@ -1024,7 +1024,7 @@ ToolDef make_resize() {
             "properties": {
                 "paths": {
                     "type": "array",
-                    "description": "Host file paths (absolute, or relative to the current Explorer folder in-app; else process cwd).",
+                    "description": "Host file paths (absolute, or relative to the current folder). When the user does not name a path, use the selected files already listed in this turn.",
                     "items": {"type": "string"},
                     "minItems": 1
                 },
@@ -1077,7 +1077,7 @@ ToolDef make_crop() {
             "properties": {
                 "paths": {
                     "type": "array",
-                    "description": "Host file paths (absolute, or relative to the current Explorer folder in-app; else process cwd).",
+                    "description": "Host file paths (absolute, or relative to the current folder). When the user does not name a path, use the selected files already listed in this turn.",
                     "items": {"type": "string"},
                     "minItems": 1
                 },
@@ -1136,7 +1136,7 @@ ToolDef make_transform() {
             "properties": {
                 "paths": {
                     "type": "array",
-                    "description": "Host file paths (absolute, or relative to the current Explorer folder in-app; else process cwd). When the user says 'these files' without naming any, the agent passes the current Explorer selection (or folder).",
+                    "description": "Host file paths (absolute, or relative to the current folder). When the user does not name a path, use the selected files already listed in this turn.",
                     "items": {"type": "string"},
                     "minItems": 1
                 },
@@ -1210,7 +1210,7 @@ ToolDef make_image_create() {
                         "reference_images": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Optional. Host paths to images used only as visual references (style, subjects, logo, color palette) - not a 'main' file to retouch. May mix user-named paths, list_images output, or Explorer selection. Also accepts the keys `references` (array) or `reference` (one string) in options, same as image_transform."
+                            "description": "Optional. Host paths to images used only as visual references (style, subjects, logo, color palette) - not a 'main' file to retouch. May mix user-named paths, list_images output, or the selected files already listed in this turn. Also accepts the keys `references` (array) or `reference` (one string) in options, same as image_transform."
                         },
                         "references": {
                             "type": "array",
@@ -1250,7 +1250,7 @@ ToolDef make_understand() {
             "properties": {
                 "paths": {
                     "type": "array",
-                    "description": "Host file paths (absolute, or relative to the current Explorer folder in-app; else process cwd). When the user says 'these files' without naming any, the agent passes the current Explorer selection (or folder).",
+                    "description": "Host file paths (absolute, or relative to the current folder). When the user does not name a path, use the selected files already listed in this turn.",
                     "items": {"type": "string"},
                     "minItems": 1
                 },
@@ -1294,7 +1294,7 @@ ToolDef make_ocr_text() {
             "properties": {
                 "paths": {
                     "type": "array",
-                    "description": "Host file paths (absolute, or relative to the current Explorer folder in-app; else process cwd). When the user says 'these files' without naming any, the agent passes the current Explorer selection (or folder).",
+                    "description": "Host file paths (absolute, or relative to the current folder). When the user does not name a path, use the selected files already listed in this turn.",
                     "items": {"type": "string"},
                     "minItems": 1
                 },

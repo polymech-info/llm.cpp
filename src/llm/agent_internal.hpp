@@ -142,13 +142,16 @@ void append_runtime_environment_context(std::ostringstream& s);
 /// Only the names present in `tools` are ever mentioned in the generated text.
 /// Set `emit_identity` to false when an external system-prompt.md already provides
 /// the "You are …" intro so the dynamic section skips the duplicate sentence.
-/// Set `emit_context` to false when the file already injects the folder/selection
-/// / open-files block via ${FOLDER} / ${CURRENT_SELECTION} / ${CURRENT_OPEN_FILES}.
+/// `emit_selection` / `emit_open_files` / `emit_folder` stay on for any of those
+/// blocks the external file did not already substitute. A file that names only
+/// one placeholder must not suppress the others.
 void append_agent_tooling_and_context(std::ostringstream& s,
                                       const Turn& turn,
                                       const nlohmann::json& tools,
                                       bool emit_identity = true,
-                                      bool emit_context  = true);
+                                      bool emit_selection = true,
+                                      bool emit_open_files = true,
+                                      bool emit_folder = true);
 
 // ── Shared session-memory rendering ───────────────────────────────────────────
 //
@@ -169,7 +172,18 @@ void append_session_items(std::ostringstream& s,
 /// k_recent_turns_inject_max. Empty when memory has no conversation pairs.
 void append_recent_turns(std::ostringstream& s,
                          const nlohmann::json& memory_state,
-                         std::size_t max_turns = 0);
+                         std::size_t max_turns = 0,
+                         bool advertise_body_recall = true);
+
+/// Same-directory replace. The destination is left intact when the replace
+/// fails. `from` is removed only after a successful replace, or by the caller
+/// when the replace fails.
+bool replace_file_preserving_destination(const std::filesystem::path& from,
+                                         const std::filesystem::path& to);
+
+/// Unique sibling of `dest` (`dest.<pid>.<n>.tmp`) so two writers do not share
+/// one temp name.
+std::filesystem::path unique_sibling_temp(const std::filesystem::path& dest);
 
 void append_relevant_session_rules(std::ostringstream& s,
                                    const nlohmann::json& memory_state,
