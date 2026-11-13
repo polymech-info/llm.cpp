@@ -60,6 +60,11 @@ PM_CHAT_API void clear_agent_tool_blocklist();
 PM_CHAT_API void set_agent_path_base(const std::string& absolute_dir_or_empty);
 PM_CHAT_API void clear_agent_path_base();
 
+/// Files the user selected for this turn. A tool path that does not exist is
+/// replaced by the one selected file with the same filename. Clear with the path base.
+PM_CHAT_API void set_agent_selection(const std::vector<std::string>& paths);
+PM_CHAT_API void clear_agent_selection();
+
 /// When enabled, `llm_path_fs_deny` rejects any path outside `agent_path_base`
 /// (hard jail for FS / search / pictures / service path tools). Used by
 /// `llm agent --serve --fs-jail`. When path base is unset, jail is deny-all.

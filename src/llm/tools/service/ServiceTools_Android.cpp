@@ -741,6 +741,7 @@ nlohmann::json service_post_create(const std::string& profile_dir,
 
 nlohmann::json service_files_upload(const std::string& profile_dir,
                                     const std::string& local_path,
+                                    bool make_public,
                                     std::string& err)
 {
   pm::cms::CmsSession session;
@@ -756,7 +757,7 @@ nlohmann::json service_files_upload(const std::string& profile_dir,
     if (c == ' ')
       c = '_';
   }
-  const std::string remote = std::string("public/") + leaf;
+  const std::string remote = make_public ? std::string("public/") + leaf : leaf;
   const pm::cms::VfsUploadResult uploaded = pm::cms::upload_vfs_file(
       session.base, session.bearer, file, "home", remote);
   if (!uploaded.ok) {
@@ -766,6 +767,7 @@ nlohmann::json service_files_upload(const std::string& profile_dir,
   return {
       {"mount", uploaded.mount},
       {"vfs_path", uploaded.path.empty() ? remote : uploaded.path},
+      {"public", make_public},
       {"url", uploaded.browser_url},
   };
 }

@@ -225,6 +225,12 @@ void set_agent_path_base(const std::string& raw) {
 
 void clear_agent_path_base() { detail::clear_agent_path_base_impl(); }
 
+void set_agent_selection(const std::vector<std::string>& paths) {
+    detail::set_agent_selection_impl(paths);
+}
+
+void clear_agent_selection() { detail::clear_agent_selection_impl(); }
+
 void set_agent_fs_jail(bool enabled) { detail::set_agent_fs_jail_impl(enabled); }
 
 void clear_agent_fs_jail() { detail::clear_agent_fs_jail_impl(); }

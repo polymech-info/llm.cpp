@@ -125,6 +125,7 @@ struct PathToolBlocklistScope {
 
 struct AgentPathBaseScope {
     bool active = false;
+    bool selection_active = false;
     bool jail_active = false;
     explicit AgentPathBaseScope(const Turn& t);
     ~AgentPathBaseScope();

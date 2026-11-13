@@ -51,6 +51,8 @@ const std::unordered_set<std::string>&      agent_tool_blocklist() noexcept;
 // Mutation hooks called from the public surface in path_tool_executor.cpp.
 void set_agent_path_base_impl(const std::string& raw);
 void clear_agent_path_base_impl();
+void set_agent_selection_impl(const std::vector<std::string>& paths);
+void clear_agent_selection_impl();
 void set_agent_tool_blocklist_impl(const std::vector<std::string>& disabled);
 void clear_agent_tool_blocklist_impl();
 void set_agent_fs_jail_impl(bool enabled);

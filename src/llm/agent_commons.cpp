@@ -771,6 +771,10 @@ AgentPathBaseScope::AgentPathBaseScope(const Turn& t) {
         media::llm::path::set_agent_path_base(base);
         active = true;
     }
+    if (!t.selection.empty()) {
+        media::llm::path::set_agent_selection(t.selection);
+        selection_active = true;
+    }
     // Serve PathBaseGuard may already own the jail for the HTTP request — do not
     // nest clear on scope exit or tools after the turn would lose the jail.
     if (t.fs_jail && !media::llm::path::agent_fs_jail_enabled()) {
@@ -780,6 +784,7 @@ AgentPathBaseScope::AgentPathBaseScope(const Turn& t) {
 }
 AgentPathBaseScope::~AgentPathBaseScope() {
     if (jail_active) media::llm::path::clear_agent_fs_jail();
+    if (selection_active) media::llm::path::clear_agent_selection();
     if (active) media::llm::path::clear_agent_path_base();
 }
 

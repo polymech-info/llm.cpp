@@ -34,6 +34,7 @@ namespace {
 
 thread_local std::unordered_set<std::string> tls_agent_tool_blocklist;
 thread_local std::string                     tls_agent_path_base;
+thread_local std::vector<std::string>        tls_agent_selection;
 thread_local bool                            tls_agent_fs_jail = false;
 
 /// True when @p child is the same as or under @p root (after lexically_normal).
@@ -88,6 +89,12 @@ void set_agent_path_base_impl(const std::string& raw) {
 }
 
 void clear_agent_path_base_impl() { tls_agent_path_base.clear(); }
+
+void set_agent_selection_impl(const std::vector<std::string>& paths) {
+    tls_agent_selection = paths;
+}
+
+void clear_agent_selection_impl() { tls_agent_selection.clear(); }
 
 void set_agent_tool_blocklist_impl(const std::vector<std::string>& disabled_names) {
     tls_agent_tool_blocklist.clear();
@@ -310,6 +317,75 @@ bool tool_string_looks_like_path_for_resolve(const std::string& s) {
 
 } // namespace
 
+namespace {
+
+bool path_is_regular_file(const fs::path& path) {
+    std::error_code ec;
+    return fs::is_regular_file(path, ec);
+}
+
+std::string canonical_regular_file(const fs::path& path) {
+    if (!path_is_regular_file(path))
+        return {};
+    std::error_code ec;
+    const fs::path canonical = fs::weakly_canonical(path, ec);
+    if (!ec && path_is_regular_file(canonical))
+        return media::path::path_to_utf8(canonical);
+    return media::path::path_to_utf8(path);
+}
+
+std::string file_with_android_prefix(const fs::path& path) {
+    if (const std::string found = canonical_regular_file(path); !found.empty())
+        return found;
+    const std::string generic = media::path::path_to_generic_utf8(path.lexically_normal());
+    const std::string data = "/data/data/";
+    const std::string user = "/data/user/0/";
+    std::string swapped;
+    if (generic.rfind(data, 0) == 0)
+        swapped = user + generic.substr(data.size());
+    else if (generic.rfind(user, 0) == 0)
+        swapped = data + generic.substr(user.size());
+    if (swapped.empty())
+        return {};
+    return canonical_regular_file(media::path::path_from_utf8(swapped));
+}
+
+std::string finish_resolved_path(const fs::path& candidate, const fs::path& base_eff, bool bare_name) {
+    if (const std::string found = file_with_android_prefix(candidate); !found.empty())
+        return found;
+
+    const fs::path leaf = candidate.filename();
+    const std::string name = media::path::path_to_utf8(leaf);
+    if (bare_name && !base_eff.empty() && !name.empty() && name != "." && name != "..") {
+        const fs::path in_workspace = (base_eff / "workspace" / leaf).lexically_normal();
+        if (const std::string found = file_with_android_prefix(in_workspace); !found.empty())
+            return found;
+    }
+    if (!name.empty() && name != "." && name != "..") {
+        std::string hit;
+        int matches = 0;
+        for (const auto& sel : tls_agent_selection) {
+            const std::string selected = file_with_android_prefix(media::path::path_from_utf8(sel));
+            if (selected.empty())
+                continue;
+            if (media::path::path_to_utf8(media::path::path_from_utf8(selected).filename()) != name)
+                continue;
+            hit = selected;
+            ++matches;
+        }
+        if (matches == 1)
+            return hit;
+    }
+
+    std::error_code ec;
+    const fs::path canonical = fs::weakly_canonical(candidate, ec);
+    if (!ec)
+        return media::path::path_to_utf8(canonical);
+    return media::path::path_to_utf8(candidate.lexically_normal());
+}
+
+} // namespace
+
 std::string resolve_tool_path_string(const std::string& raw) {
     const std::string cleaned = media::path::normalize_local_path(raw, true);
     if (cleaned.empty()) return cleaned;
@@ -324,23 +400,18 @@ std::string resolve_tool_path_string(const std::string& raw) {
         ? (fallback_base.empty() ? cwd : fallback_base)
         : media::path::path_from_utf8(tls_agent_path_base);
     const fs::path global_root = media::settings::get_config_dir();
+    const bool bare_name = cleaned.find('/') == std::string::npos && cleaned.find('\\') == std::string::npos;
     if (const auto aliased = try_resolve_known_path_alias(cleaned, cwd, base_eff, global_root); aliased.has_value()) {
-        std::error_code ec_alias;
         const fs::path p = aliased->lexically_normal();
         if (has_glob) return media::path::path_to_utf8(p);
-        const fs::path c = fs::weakly_canonical(p, ec_alias);
-        if (!ec_alias) return media::path::path_to_utf8(c);
-        return media::path::path_to_utf8(p);
+        return finish_resolved_path(p, base_eff, bare_name);
     }
 
-    std::error_code ec;
     fs::path p_in = media::path::path_from_utf8(cleaned);
     if (p_in.is_absolute()) {
         fs::path p = p_in.lexically_normal();
         if (has_glob) return media::path::path_to_utf8(p);
-        const fs::path c = fs::weakly_canonical(p, ec);
-        if (!ec) return media::path::path_to_utf8(c);
-        return media::path::path_to_utf8(p);
+        return finish_resolved_path(p, base_eff, false);
     }
 
     const fs::path rel = p_in.lexically_normal();
@@ -358,9 +429,7 @@ std::string resolve_tool_path_string(const std::string& raw) {
     }
 
     if (has_glob) return media::path::path_to_utf8(p);
-    const fs::path c = fs::weakly_canonical(p, ec);
-    if (!ec) return media::path::path_to_utf8(c);
-    return media::path::path_to_utf8(p);
+    return finish_resolved_path(p, base_eff, bare_name);
 }
 
 void resolve_tool_paths_strings_in_json(nlohmann::json& j, const std::string* parent_obj_key) {

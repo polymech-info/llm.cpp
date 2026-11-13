@@ -124,6 +124,7 @@ ExecuteResult do_create_video(const nlohmann::json& args, const std::string& too
         if (!raw.empty())
             out_path = resolve_tool_path_string(raw);
     }
+    out_path = media::place_generated_video(out_path, opt.prompt);
     if (const std::string wOut = llm_path_fs_deny(out_path); !out_path.empty() && !wOut.empty()) {
         PerFileResult r;
         r.path = out_path;
@@ -349,7 +350,7 @@ nlohmann::json create_video_fallback_input_schema() {
         {"items", {{"type", "string"}}},
         {"minItems", 1},
         {"maxItems", 2},
-        {"description", "Alias of src (Explorer selection / current folder stills)."},
+        {"description", "Alias of src. When the user does not name a path, use the selected files already listed in this turn."},
     };
     props["start_frame"] = {
         {"type", "string"},
