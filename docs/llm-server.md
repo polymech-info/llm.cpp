@@ -507,6 +507,15 @@ optional `mic` and `loopback` name fields. `sources.mix` is false when that laye
 not built, and `mix` then returns 400. `FEATURE_AUDIO_SOURCES` off answers every
 `/v1/audio/*` route with HTTP 501 `audio_unavailable`.
 
+A client can also send `sources`: a list of `{ spec, gain }` for several microphones
+and outputs. Gain is 0 to 2. The host applies those gains and sums the devices into
+the one PCM stream. `GET /v1/audio/sources` sets `bus` true when that list is accepted.
+Posting the same specs again, on `/v1/audio/start` or `/v1/audio/source`, updates the
+gains and leaves the devices open. An idle `/v1/audio/source` stores that whole list.
+A later `/v1/audio/start` with an empty body opens it, gains included. `GET /v1/audio/status` then lists each source with
+its `gain` and a pre-gain `peak`. The phone sends those gains and does not mix the
+remote devices itself.
+
 Auth is the serve bearer, or a paired device with the `audio` scope. The default
 pairing grant does not include it. `apps/remote` is not a consumer yet.
 
