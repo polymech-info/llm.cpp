@@ -178,7 +178,12 @@ std::string stage_message_images(const nlohmann::json& body,
                                  std::vector<std::string>& paths);
 std::string stage_mobile_attachments(const nlohmann::json& body,
                                      const std::string& folder,
-                                     std::vector<std::string>& paths);
+                                     std::vector<std::string>& paths,
+                                     std::vector<std::pair<std::string, std::string>>* staged = nullptr);
+
+/// Replace staged relative paths inside a workflow object with the absolute files.
+void rewrite_staged_paths(nlohmann::json& node,
+                          const std::vector<std::pair<std::string, std::string>>& staged);
 
 /// Capability decisions from serve flags. The host copies these onto Turn.
 struct ServerTurnCaps {

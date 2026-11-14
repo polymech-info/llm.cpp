@@ -188,6 +188,21 @@ ExecuteResult do_create_video(const nlohmann::json& args, const std::string& too
         opt.reference_images = std::move(refs);
     }
 
+    // Veo accepts JPEG or PNG only. A picked still is often HEIC or WebP
+    // stored under a .jpg name. Decode and cap the long edge before upload.
+    // load_image_for_transform already does that when these flags are set.
+    opt.resize_first = true;
+    opt.preresize_raw_only = false;
+    {
+        const std::string frame_res = json_string_or(args, "resolution");
+        if (frame_res == "1080p")
+            opt.resize_width = 1920;
+        else if (frame_res == "4K" || frame_res == "2160p")
+            opt.resize_width = 3840;
+        else
+            opt.resize_width = 1280;
+    }
+
     if (tanit_video) {
         opt.video_duration = json_int_or(args, "duration", json_int_or(args, "seconds", 0));
         opt.video_resolution = json_string_or(args, "resolution");

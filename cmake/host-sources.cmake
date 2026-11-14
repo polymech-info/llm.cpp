@@ -198,6 +198,7 @@ function(pm_llm_sources group out_var)
       "${_s}/agent_factory.cpp"
       "${_s}/agent_feature.cpp"
       "${_s}/agent_feature_Workflow.cpp"
+      "${_s}/agent_workflow.cpp"
       "${_s}/agent_commons.cpp"
       "${_s}/agent_context.cpp"
       "${_s}/agent_json_storage.cpp"

@@ -12,6 +12,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <sstream>
 
 #if !defined(_WIN32)
@@ -480,7 +481,8 @@ std::string stage_message_images(const nlohmann::json& body,
 
 std::string stage_mobile_attachments(const nlohmann::json& body,
                                      const std::string& folder,
-                                     std::vector<std::string>& paths)
+                                     std::vector<std::string>& paths,
+                                     std::vector<std::pair<std::string, std::string>>* staged)
 {
     if (!body.contains("tanit") || !body["tanit"].is_object())
         return {};
@@ -534,6 +536,10 @@ std::string stage_mobile_attachments(const nlohmann::json& body,
                       static_cast<std::streamsize>(bytes.size()));
         if (!ofs.good())
             return "could not write mobile attachment";
+        if (staged) {
+            staged->emplace_back(media::path::path_to_generic_utf8(relative),
+                                 media::path::path_to_utf8(destination));
+        }
     }
 
     if (tanit.contains("mobile_selection") && tanit["mobile_selection"].is_array()) {
@@ -558,6 +564,42 @@ std::string stage_mobile_attachments(const nlohmann::json& body,
     logger::info(std::string("llm-server staged ") + std::to_string(attachments.size())
                  + " mobile file(s) into " + media::path::path_to_utf8(root));
     return {};
+}
+
+void rewrite_staged_paths(nlohmann::json& node,
+                          const std::vector<std::pair<std::string, std::string>>& staged)
+{
+    if (staged.empty() || node.is_null())
+        return;
+    std::vector<std::pair<std::string, std::string>> pairs = staged;
+    std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) {
+        return a.first.size() > b.first.size();
+    });
+    std::function<void(nlohmann::json&)> walk = [&](nlohmann::json& n) {
+        if (n.is_object()) {
+            for (auto it = n.begin(); it != n.end(); ++it)
+                walk(it.value());
+        } else if (n.is_array()) {
+            for (auto& item : n)
+                walk(item);
+        } else if (n.is_string()) {
+            std::string text = n.get<std::string>();
+            bool changed = false;
+            for (const auto& pair : pairs) {
+                if (pair.first.empty())
+                    continue;
+                std::size_t at = 0;
+                while ((at = text.find(pair.first, at)) != std::string::npos) {
+                    text.replace(at, pair.first.size(), pair.second);
+                    at += pair.second.size();
+                    changed = true;
+                }
+            }
+            if (changed)
+                n = std::move(text);
+        }
+    };
+    walk(node);
 }
 
 nlohmann::json usage_fields(const nlohmann::json& raw)

@@ -581,8 +581,9 @@ void pm_image_register_llm(CLI::App& app, PmImageCliState& s) {
         ->group("Server");
     s.llm_agent_cmd->add_option(
         "--pair-scopes", s.ag_serve_pair_scopes,
-        "Comma list granted by --pair: chat, files, tools, video. "
-        "Default: chat, files, tools. video is the remote desktop viewer.")
+        "Comma list granted by --pair: chat, files, tools, video, audio. "
+        "Default: chat, files, tools. video is the remote desktop viewer. "
+        "audio is microphone and loopback capture.")
         ->group("Server");
     s.llm_agent_cmd->add_flag(
         "--lan-devices", s.ag_serve_lan_devices,

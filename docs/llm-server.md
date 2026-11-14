@@ -295,6 +295,12 @@ Today: `tools[]` is ignored (compat). When this surface is productized, **reject
 | POST | `/v1/video/signal` | Push one signaling message |
 | POST | `/v1/video/transcribe` | Raw audio body (WAV). Same as the prototype `/transcribe` |
 | POST | `/v1/video/speak` | Body `{ text, format? }`. Returns audio bytes for the client to play |
+| GET | `/v1/audio/status` | Capture session. Idle until `POST /v1/audio/start` |
+| GET | `/v1/audio/sources` | Microphones and loopback endpoints. Each `spec` is an `input` |
+| POST | `/v1/audio/start` | Body `{ input, mic?, loopback? }`. Opens that source |
+| POST | `/v1/audio/stop` | Releases the capture. Idle again |
+| POST | `/v1/audio/source` | Body `{ input, mic?, loopback? }`. Switch, or store the input while idle |
+| GET | `/v1/audio/stream` | Raw s16le, 48 kHz stereo, while a capture is running. 409 while idle |
 
 Auth (when `--serve-api-key` / `TANIT_SERVE_API_KEY` set): required on every
 `/v1/*` route except `GET /v1/models` on the direct HTTP port. `/health` and `/ready` stay open.
@@ -312,10 +318,25 @@ return an error from `--lan`.
 
 Discovery is `_tanit._tcp`. TXT keys are `txtvers=1`, `v=1` (protocol), `fp` (lowercase
 SHA-256 hex of the SubjectPublicKeyInfo), and `name`. No secret and no token. mDNS
-can fail on guest Wi-Fi or across VLANs; the process still serves TLS and prints
-every IPv4 address plus the colon fingerprint. Trust that fingerprint, not the
-advertised name. An address change does not require pairing again. A fingerprint
-change (lost key container `TanitLanIdentity.rsa.v1`) revokes every device.
+can fail on guest Wi-Fi, across VLANs, or over a Tailscale route: multicast does not
+leave the local link. The process still serves TLS and prints every IPv4 address
+plus the colon fingerprint. Trust that fingerprint, not the advertised name. An
+address change does not require pairing again. A fingerprint change (lost key
+container `TanitLanIdentity.rsa.v1`) revokes every device.
+
+The phone does not try to forward mDNS. It remembers each saved base URL (at most
+eight, newest first) and probes those URLs while `NsdManager` browses. When a
+desktop answers `GET /v1/lan/info`, the phone also tries the other addresses in
+that response (`https://<address>:<tls_port>`, including a Tailscale `100.x`
+address) and remembers the ones that answer. A saved `https://` address whose
+certificate is the desktop key stays pinned to `fp`. A typed URL with no pin —
+including a Tailscale Serve name such as `https://<host>.<tailnet>.ts.net` in
+front of the loopback HTTP port — is checked with the system trust store. If
+that handshake fails, the phone retries a desktop key it has already seen, so
+the same desktop's Tailscale IP still matches. Either way it is checked against
+`/v1/lan/info`. Do not put this server on Tailscale
+Funnel; Funnel is public. Tailscale reachability is not an application grant:
+the serve key and pairing checks stay in place.
 
 `--pair` (implies `--lan`) or loopback `POST /v1/lan/pair/begin` opens one short-lived
 single-use ticket (default 300s, clamped 30–900). The QR and the `tanit://pair` URI
@@ -334,15 +355,16 @@ Success returns `{ token, device_id, fingerprint, scopes, protocol }`. The token
 `tn1_` plus 32 random bytes. The store keeps only its SHA-256. Re-pairing the same
 device id rotates the token. Max 64 devices.
 
-Scopes are `chat`, `files`, `tools`, and `video`. Omit `scopes` to take the ticket's grant
-(default: chat, files, and tools — not video). `chat` is completions, sessions, speak,
+Scopes are `chat`, `files`, `tools`, `video`, and `audio`. Omit `scopes` to take the ticket's grant
+(default: chat, files, and tools — not video, not audio). `chat` is completions, sessions, speak,
 realtime control/events, and `POST /v1/logs`. Starting realtime requires both `chat` and `tools`, because
 the Voice Agent exposes delegated `run_pm_agent`; a chat-only device forces `no_tools`
 on completions. `files` is `POST /v1/llm/path-tools/call`,
 `POST /v1/ui/open-file`, and `/v1/vfs/*`. `tools` is the agent tool loop plus `/v1/chat/commands/run`,
 `/v1/llm/each`, `/v1/llm/decide`, and `/v1/ui/open`. `video` is `/v1/video/*` (screen
-capture plus pointer and key injection). A chat-only device cannot call it. Ask for it
-on the ticket (`--pair-scopes chat,files,tools,video` or `POST /v1/lan/pair/begin`).
+capture plus pointer and key injection). `audio` is `/v1/audio/*` (microphone, loopback,
+and mix). A chat-only device cannot call either. Ask for them
+on the ticket (`--pair-scopes chat,files,tools,video,audio` or `POST /v1/lan/pair/begin`).
 Host-tool providers and page-model rank stay on the desktop. The serve API key is full
 access, including video. Direct loopback with an empty serve key stays open, as before.
 
@@ -369,7 +391,8 @@ System and other-app log buffers are not included; those stay on the ADB bridge.
 the roaming config dir) and do not need `--serve`. A running daemon reloads it.
 `GET /health` grows a `lan` object (protocol, name, fingerprint, tls_port, pairing, mdns, addresses) when `--lan` is on.
 
-The phone app is separate. It should browse with `NsdManager`, pin `fp`, then call
+The phone app is separate. It browses with `NsdManager` and, in parallel, probes
+saved unicast URLs. It pins `fp` only for the desktop's own certificate, then calls
 the routes above. On Android 17 / API 37, broad LAN access needs `ACCESS_LOCAL_NETWORK`;
 the system NSD picker can grant one device instead. That also applies to the sockets
 the phone uses after pairing. Cloud rendezvous and Bluetooth are out of scope.
@@ -465,6 +488,27 @@ desktop path tool and is a different route. Control bodies are unchanged (`actio
 
 A binary built without `FEATURE_VIDEO_STREAM` answers these routes with HTTP 501
 `video_unavailable`. An MJPEG client holds one HTTP worker until it disconnects.
+
+### Audio sources
+
+`/v1/audio/*` lists and opens one capture on the serve machine. The session is
+`pm::audio::SourceHost` in audio.cpp. The server only mounts it. It is not the screen
+recorder. `GET /v1/audio/sources` returns `mics` and `loopback`. A row's `spec` is
+`mic:<name>` or `loopback:<name>`. `mic` and `loopback` with no name open the default
+of that kind. `POST /v1/audio/start` and `POST /v1/audio/source` take that `spec` as
+`input`. One session per process. A failed switch leaves the current capture running.
+`GET /v1/audio/status` reports `frames` and `peak` (s16) so a quiet microphone still
+counts once samples arrive. PCM is 48 kHz stereo. `GET /v1/audio/stream` copies those
+samples as raw s16le for one reader. A slow reader drops old samples. 409 while idle.
+The phone mixes its own microphone locally and does not upload it.
+
+`mix` is a separate layer (`FEATURE_AUDIO_MIX`, default on). `input` is `mix`, with
+optional `mic` and `loopback` name fields. `sources.mix` is false when that layer was
+not built, and `mix` then returns 400. `FEATURE_AUDIO_SOURCES` off answers every
+`/v1/audio/*` route with HTTP 501 `audio_unavailable`.
+
+Auth is the serve bearer, or a paired device with the `audio` scope. The default
+pairing grant does not include it. `apps/remote` is not a consumer yet.
 
 ---
 

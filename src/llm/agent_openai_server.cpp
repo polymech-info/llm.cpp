@@ -20,6 +20,7 @@
 #include "win/settings_store.hpp"
 #endif
 #include "llm/agent.hpp"
+#include "llm/agent_workflow.hpp"
 #include "llm/agent_launch.hpp"
 #include "llm/agent_tool_provider.hpp"
 #include "llm/agent_memory.hpp"
@@ -46,6 +47,9 @@
 #include "audio/session/audio_events.hpp"
 #if defined(FEATURE_VIDEO) && FEATURE_VIDEO && defined(FEATURE_VIDEO_STREAM) && FEATURE_VIDEO_STREAM
 #include "video_stream_host.hpp"
+#endif
+#if defined(FEATURE_AUDIO_SOURCES) && FEATURE_AUDIO_SOURCES
+#include "pm/audio/source_host.hpp"
 #endif
 
 #if defined(_WIN32)
@@ -97,6 +101,18 @@ static void stop_llm_video_host()
 #if defined(FEATURE_VIDEO) && FEATURE_VIDEO && defined(FEATURE_VIDEO_STREAM) && FEATURE_VIDEO_STREAM
     if (g_llm_video_host)
         g_llm_video_host->stop();
+#endif
+}
+
+#if defined(FEATURE_AUDIO_SOURCES) && FEATURE_AUDIO_SOURCES
+static std::shared_ptr<pm::audio::SourceHost> g_llm_audio_host;
+#endif
+
+static void stop_llm_audio_host()
+{
+#if defined(FEATURE_AUDIO_SOURCES) && FEATURE_AUDIO_SOURCES
+    if (g_llm_audio_host)
+        g_llm_audio_host->stop();
 #endif
 }
 
@@ -219,6 +235,15 @@ using media::llm::agent::cliopt::apply_provider_defaults;
 using media::llm::agent::cliopt::clip_text;
 using media::llm::agent::cliopt::completion_success_json;
 using media::llm::agent::cliopt::is_video_route;
+
+bool is_audio_route(const std::string& path)
+{
+    const std::string prefix = "/v1/audio";
+    if (path == prefix)
+        return true;
+    return path.size() > prefix.size() && path.compare(0, prefix.size(), prefix) == 0
+           && path[prefix.size()] == '/';
+}
 using media::llm::agent::cliopt::log_level_name;
 using media::llm::agent::cliopt::looks_like_loopback_script;
 using media::llm::agent::cliopt::openai_completion_id;
@@ -229,6 +254,7 @@ using media::llm::agent::cliopt::parse_host_tool_provider_spec;
 using media::llm::agent::cliopt::resolve_request_selection;
 using media::llm::agent::cliopt::sse_data_line;
 using media::llm::agent::cliopt::stage_message_images;
+using media::llm::agent::cliopt::rewrite_staged_paths;
 using media::llm::agent::cliopt::stage_mobile_attachments;
 using media::llm::agent::cliopt::trim_ascii;
 using media::llm::agent::cliopt::usage_fields;
@@ -447,8 +473,9 @@ TurnOutcome run_one_completion(const AgentServerOptions& opt,
     turn.seed_chat_messages = parsed.seed_chat_messages;
     turn.folder_hint        = folder;
     turn.selection          = resolve_request_selection(body);
+    std::vector<std::pair<std::string, std::string>> staged_files;
     {
-        std::string stage_err = stage_mobile_attachments(body, folder, turn.selection);
+        std::string stage_err = stage_mobile_attachments(body, folder, turn.selection, &staged_files);
         if (!stage_err.empty()) {
             out.error = std::move(stage_err);
             return out;
@@ -463,6 +490,18 @@ TurnOutcome run_one_completion(const AgentServerOptions& opt,
     }
     if (turn.user_prompt.empty() && !turn.selection.empty())
         turn.user_prompt = "Use the selected context.";
+    {
+        nlohmann::json send = nlohmann::json::object();
+        if (body.contains("workflow") && body["workflow"].is_object())
+            send["workflow"] = body["workflow"];
+        else if (body.contains("tanit") && body["tanit"].is_object()
+                 && body["tanit"].contains("workflow") && body["tanit"]["workflow"].is_object())
+            send["workflow"] = body["tanit"]["workflow"];
+        if (send.contains("workflow")) {
+            rewrite_staged_paths(send["workflow"], staged_files);
+            media::llm::agent::apply_workflow_send_json(send, turn);
+        }
+    }
     if (body.contains("tanit") && body["tanit"].is_object()
         && body["tanit"].contains("tool_providers")
         && body["tanit"]["tool_providers"].is_array()) {
@@ -985,6 +1024,8 @@ bool device_scope_ok(const lan::DeviceAuth& dev, const httplib::Request& req)
         return dev.has("chat");
     if (is_video_route(path))
         return dev.has("video");
+    if (is_audio_route(path))
+        return dev.has("audio");
     if (path.rfind("/v1/vfs", 0) == 0)
         return dev.has("files");
     if (path == "/v1/llm/path-tools/call" || path == "/v1/ui/open-file")
@@ -3413,6 +3454,117 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
         svr.Post(path, video_unavailable);
 #endif
 
+#if defined(FEATURE_AUDIO_SOURCES) && FEATURE_AUDIO_SOURCES
+    g_llm_audio_host = std::make_shared<pm::audio::SourceHost>();
+    {
+        const auto host = g_llm_audio_host;
+        auto write_audio = [](httplib::Response& res, const pm::audio::SourceReply& reply) {
+            res.status = reply.status;
+            res.set_content(reply.body.dump(2) + "\n", "application/json; charset=utf-8");
+        };
+        auto read_body = [](const httplib::Request& req, httplib::Response& res, nlohmann::json& body) -> bool {
+            try {
+                body = req.body.empty() ? nlohmann::json::object() : nlohmann::json::parse(req.body);
+            } catch (const std::exception& ex) {
+                res.status = 400;
+                res.set_content(nlohmann::json{{"ok", false},
+                                               {"error", std::string("invalid JSON: ") + ex.what()}}
+                                    .dump(2) + "\n",
+                                "application/json; charset=utf-8");
+                return false;
+            }
+            return true;
+        };
+        svr.Get("/v1/audio/status", [host, require_v1_auth, write_audio](const httplib::Request& req,
+                                                                         httplib::Response& res) {
+            if (!require_v1_auth(req, res))
+                return;
+            write_audio(res, host->status());
+        });
+        svr.Get("/v1/audio/sources", [host, require_v1_auth, write_audio](const httplib::Request& req,
+                                                                          httplib::Response& res) {
+            if (!require_v1_auth(req, res))
+                return;
+            write_audio(res, host->sources());
+        });
+        svr.Post("/v1/audio/start", [host, require_v1_auth, write_audio, read_body](const httplib::Request& req,
+                                                                                    httplib::Response& res) {
+            if (!require_v1_auth(req, res))
+                return;
+            nlohmann::json body;
+            if (!read_body(req, res, body))
+                return;
+            write_audio(res, host->start(body));
+        });
+        svr.Post("/v1/audio/stop", [host, require_v1_auth, write_audio](const httplib::Request& req,
+                                                                        httplib::Response& res) {
+            if (!require_v1_auth(req, res))
+                return;
+            host->stop();
+            auto reply = host->status();
+            reply.body["accepted"] = true;
+            reply.body["stopped"] = true;
+            write_audio(res, reply);
+        });
+        svr.Post("/v1/audio/source", [host, require_v1_auth, write_audio, read_body](const httplib::Request& req,
+                                                                                     httplib::Response& res) {
+            if (!require_v1_auth(req, res))
+                return;
+            nlohmann::json body;
+            if (!read_body(req, res, body))
+                return;
+            write_audio(res, host->select(body));
+        });
+        svr.Get("/v1/audio/stream", [host, require_v1_auth](const httplib::Request& req, httplib::Response& res) {
+            if (!require_v1_auth(req, res))
+                return;
+            const auto idle = host->status();
+            if (!idle.body.value("running", false)) {
+                res.status = 409;
+                res.set_content(nlohmann::json{{"ok", false},
+                                               {"error", "audio capture is idle"},
+                                               {"phase", "idle"}}
+                                    .dump(2) + "\n",
+                                "application/json; charset=utf-8");
+                return;
+            }
+            res.set_header("Cache-Control", "no-cache");
+            res.set_header("X-Audio-Sample-Rate", std::to_string(idle.body.value("sampleRate", 48000)));
+            res.set_header("X-Audio-Channels", std::to_string(idle.body.value("channels", 2)));
+            res.set_chunked_content_provider(
+                "application/octet-stream",
+                [host](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                    std::int16_t buf[960];
+                    const int frames = host->pull(buf, 480, 200);
+                    if (frames < 0) {
+                        sink.done();
+                        return false;
+                    }
+                    if (frames == 0)
+                        return true;
+                    const size_t bytes = static_cast<size_t>(frames) * 2 * sizeof(std::int16_t);
+                    if (!sink.write(reinterpret_cast<const char*>(buf), bytes))
+                        return false;
+                    return true;
+                });
+        });
+    }
+#else
+    auto audio_unavailable = [require_v1_auth](const httplib::Request& req, httplib::Response& res) {
+        if (!require_v1_auth(req, res))
+            return;
+        res.status = 501;
+        res.set_content(openai_error("audio sources are not built into this binary", "server_error",
+                                     "audio_unavailable")
+                            .dump(),
+                        "application/json");
+    };
+    for (const char* path : {"/v1/audio/status", "/v1/audio/sources", "/v1/audio/stream"})
+        svr.Get(path, audio_unavailable);
+    for (const char* path : {"/v1/audio/start", "/v1/audio/stop", "/v1/audio/source"})
+        svr.Post(path, audio_unavailable);
+#endif
+
     auto lan_off = [](httplib::Response& res) {
         res.status = 404;
         res.set_content(openai_error("LAN discovery is off; restart with --lan").dump(),
@@ -3560,7 +3712,7 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
         if (body.contains("scopes")) {
             if (!body["scopes"].is_array() || body["scopes"].empty()) {
                 res.status = 400;
-                res.set_content(openai_error("scopes must list chat, files, tools, or video").dump(),
+                res.set_content(openai_error("scopes must list chat, files, tools, video, or audio").dump(),
                                 "application/json");
                 return;
             }
@@ -3825,6 +3977,7 @@ int run_llm_agent_openai_server(const AgentServerOptions& opt)
             std::cerr << "llm agent --serve: "
                       << (lan_err.empty() ? "could not start LAN discovery" : lan_err) << "\n";
             stop_llm_video_host();
+            stop_llm_audio_host();
             svr->stop();
             if (server_thread.joinable())
                 server_thread.join();
@@ -3873,7 +4026,8 @@ int run_llm_agent_openai_server(const AgentServerOptions& opt)
 
     std::cout << "llm agent --serve: " << base
               << "  (GET /health, GET /v1/models, POST /v1/chat/completions,"
-              << " POST /v1/llm/each, POST /v1/llm/decide, GET /v1/video/status; concurrency="
+              << " POST /v1/llm/each, POST /v1/llm/decide, GET /v1/video/status,"
+              << " GET /v1/audio/sources; concurrency="
               << options.concurrency << "; max_waiting=" << max_waiting
               << "; http_workers=" << http_workers
               << "; auth=" << (options.serve_api_key.empty() ? "off" : "on")
@@ -3892,6 +4046,7 @@ int run_llm_agent_openai_server(const AgentServerOptions& opt)
     if (lan_service)
         lan_service->stop();
     stop_llm_video_host();
+    stop_llm_audio_host();
     svr->stop();
     if (server_thread.joinable())
         server_thread.join();

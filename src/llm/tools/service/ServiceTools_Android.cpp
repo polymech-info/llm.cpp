@@ -713,6 +713,7 @@ nlohmann::json service_post_create(const std::string& profile_dir,
                                    const std::string& image_path,
                                    const std::string& title,
                                    const std::string& description,
+                                   const std::string& visibility,
                                    std::string& err)
 {
   pm::cms::CmsSession session;
@@ -724,7 +725,7 @@ nlohmann::json service_post_create(const std::string& profile_dir,
     return {};
   }
   const auto created = pm::cms::create_post_with_pictures(
-      session.base, session.bearer, {file}, title, description, "public");
+      session.base, session.bearer, {file}, title, description, visibility);
   if (!created.ok) {
     err = created.err.empty() ? "Couldn't publish post" : created.err;
     return {};
