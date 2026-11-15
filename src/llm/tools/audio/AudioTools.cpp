@@ -23,7 +23,7 @@
 
 #if defined(FEATURE_STT) && FEATURE_STT
 #  include "core/audio.hpp"
-#  include "core/mic_activity.hpp"
+#  include "pm/audio/mic_activity.hpp"
 #  include "audio/audio_constants.hpp"
 #  include "audio/tts/elevenlabs_tts.hpp"
 #  include "audio/tts/proxy_tts.hpp"

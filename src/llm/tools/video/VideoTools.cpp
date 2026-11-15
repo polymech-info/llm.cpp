@@ -369,7 +369,10 @@ nlohmann::json create_video_fallback_input_schema() {
     };
     props["start_frame"] = {
         {"type", "string"},
-        {"description", "Optional start-frame still (host path). Alias of a single src[0]."},
+        {"description",
+         "Optional start-frame still (host path). Alias of a single src[0]. "
+         "When the user animates a prior picture, use the exact path from ## Session Items "
+         "or Selected files; omit for plain text-to-video."},
     };
     props["image"] = {
         {"type", "string"},
@@ -377,7 +380,9 @@ nlohmann::json create_video_fallback_input_schema() {
     };
     props["last_frame"] = {
         {"type", "string"},
-        {"description", "Optional last-frame still (host path). Alias of src[1]."},
+        {"description",
+         "Optional last-frame still (host path). Alias of src[1]. "
+         "Use a second Session Items / selection still only when the user wants a distinct end frame."},
     };
     props["reference_images"] = {
         {"type", "array"},
@@ -410,12 +415,13 @@ nlohmann::json create_video_fallback_input_schema() {
 ToolDef make_create_video() {
     return ToolDef{
         "create_video",
-        "Generate a short video clip. **Infer** arguments once from the user prompt, the runtime "
-        "folder/selection block, and this tool\u2019s parameter schema. Keyframes use **src** "
-        "(or **paths**): `[0]` first frame, `[1]` last frame, or **start_frame** / **image** / **last_frame** "
-        "(aliases; both forms may be sent if they match). "
+        "Generate a short video clip. **Infer** arguments once from the user prompt, ## Session Items, "
+        "the runtime folder/selection block, and this tool\u2019s parameter schema. "
+        "Plain text-to-video: `prompt` only (omit frames). Image-to-video: keyframes via **start_frame** / "
+        "**last_frame** (or **src** / **paths** `[0]`/`[1]`; aliases may both be sent if they match) — "
+        "prefer exact paths from Session Items or Selected files; do not invent paths. "
         "Style / brand stills use **references** (or **reference_images** / **reference**); they are "
-        "not keyframes. "
+        "not keyframes. When the host Filmstrip inject already pins start/end, do not also pass src/paths. "
         "**Single-call rule: at most one `create_video` per user request.** Never auto-retry after a failure. "
         "Tanit aliases (`video-fast`, `video-deep`) use LiteLLM `/v1/videos` (OpenRouter Veo). "
         "Replicate slugs keep the native predictions path. The reply carries "

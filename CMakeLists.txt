@@ -16,6 +16,7 @@ add_library(kbot STATIC
   src/kbot/kbot.cpp
   src/kbot/llm_client.cpp
   src/kbot/llm_client_realtime.cpp
+  src/kbot/llm_client_translation.cpp
   src/kbot/source_files.cpp
   src/liboai/liboai/components/audio.cpp
   src/liboai/liboai/components/azure.cpp

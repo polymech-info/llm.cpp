@@ -283,7 +283,8 @@ void append_session_items(std::ostringstream& s,
 
     std::ostringstream block;
     block << "\n## Session Items\n"
-             "Use these durable references by role, origin, locator, and recency before asking the user for previous outputs. Newest first.\n";
+             "Use these durable references by role, origin, locator, and recency before asking the user for previous outputs. Newest first. "
+             "Image items may be passed to create_video as start_frame / last_frame (newest matching still first).\n";
     if (has_retrievable_body)
         block << "For body_available=true, recover the exact prior reply with memory_find(itemId=<turn id>, includeBody=true) before writing or exporting it.\n";
     if (has_retrievable_payload)

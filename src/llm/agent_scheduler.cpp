@@ -421,14 +421,17 @@ nlohmann::json run_due(std::chrono::system_clock::time_point now,
                 ++agent_runs;
                 std::string text = tick.ok ? tick.text : tick.error;
                 if (text.size() > 180) text.resize(180);
-                results.push_back({
+                nlohmann::json row = {
                     {"task_id", began.task.id},
                     {"occurrence_id", began.task.occurrence_id},
                     {"title", began.task.title},
                     {"text", std::move(text)},
                     {"ok", tick.ok},
                     {"execution", "agent"},
-                });
+                };
+                if (!tick.files.empty())
+                    row["files"] = tick.files;
+                results.push_back(std::move(row));
             }
             break;
         }
@@ -460,14 +463,17 @@ nlohmann::json run_due(std::chrono::system_clock::time_point now,
                 ++tool_runs;
                 std::string text = tick.ok ? tick.text : tick.error;
                 if (text.size() > 180) text.resize(180);
-                results.push_back({
+                nlohmann::json row = {
                     {"task_id", began.task.id},
                     {"occurrence_id", began.task.occurrence_id},
                     {"title", began.task.title},
                     {"text", std::move(text)},
                     {"ok", tick.ok},
                     {"execution", "tool"},
-                });
+                };
+                if (!tick.files.empty())
+                    row["files"] = tick.files;
+                results.push_back(std::move(row));
             }
             break;
         }

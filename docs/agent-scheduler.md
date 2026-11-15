@@ -241,7 +241,7 @@ flowchart TD
   notes --> post[ScheduleHost notification]
 ```
 
-WorkManager is one-shot and deferrable. A delay under 15 minutes is not a 5-second promise. A best-effort reminder can fire minutes late. That delay is still the same task. Sub-minute `schedule_every` stays valid in the store. It fires from the in-process loop while the process is alive. The 15-minute WorkManager floor is not applied at create.
+WorkManager is one-shot and deferrable. A delay under 15 minutes is not a 5-second promise on WorkManager alone. On Android, `ScheduleHost` also arms an AlarmManager catch-up for any work wakeup sooner than 15 minutes, so a 5-minute `schedule_every` does not sit in the ~30-minute JobScheduler batch window. Sub-minute `schedule_every` stays valid in the store. It fires from the in-process loop while the process is alive, and from that catch-up alarm when the process is gone. The 15-minute floor is not applied at create.
 
 Exact alarms use `setExactAndAllowWhileIdle` when `canScheduleExactAlarms()` is true, and `setAndAllowWhileIdle` otherwise. The manifest has `SCHEDULE_EXACT_ALARM`. It does not have `USE_EXACT_ALARM`. The user grants exact alarms from the Schedule screen. There is no deny callback.
 

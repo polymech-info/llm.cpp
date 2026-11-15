@@ -65,8 +65,10 @@ namespace media::llm::agent {
 bool android_stub_path_tool(const std::string& name)
 {
 #if defined(__ANDROID__)
+    // `run` / `run_sequence` spawn a host shell. On the phone that tries
+    // python/sh and can kill the chat process. Keep them out of the catalog.
     return name == "search_index" || name == "search_query" || name == "search_detail"
-        || name == "download_url";
+        || name == "download_url" || name == "run" || name == "run_sequence";
 #else
     (void)name;
     return false;
@@ -77,7 +79,7 @@ void android_disable_stub_path_tools(std::vector<std::string>& names)
 {
 #if defined(__ANDROID__)
     for (const char* stub : {"search_index", "search_query", "search_detail",
-                             "download_url"}) {
+                             "download_url", "run", "run_sequence"}) {
         if (std::find(names.begin(), names.end(), stub) == names.end())
             names.emplace_back(stub);
     }

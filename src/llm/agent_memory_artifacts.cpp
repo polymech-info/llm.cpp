@@ -558,6 +558,8 @@ bool tool_produces_path_artifact(std::string_view name)
         || name == "file_compose"
         || name == "download_url"
         || name == "file_str_replace"
+        || name == "office_create"
+        || name == "office_batch"
         || name == "image_create"
         || name == "image_transform"
         || name == "image_resize"
@@ -1314,8 +1316,10 @@ nlohmann::json session_persist_artifacts_from_result(const std::string& session_
             {"text",
              "Resolve prior generated outputs from session items by role, origin, and recency. "
              "Do not ask the user for paths, filenames, or 'what content' when the most recent "
-             "session item already answers the reference; read or transform it instead."},
-            {"trigger", "user references a previous file, JSON, markdown, result, artifact, page, search, or observation"},
+             "session item already answers the reference; read or transform it instead. "
+             "For create_video, use image item paths as start_frame / last_frame when the user "
+             "animates or continues from a prior still; plain text-to-video needs no frames."},
+            {"trigger", "user references a previous file, JSON, markdown, result, artifact, page, search, observation, or asks to animate / video a prior still"},
             {"action", "lookup matching session item by role, origin, locator, and recency"},
             {"scope", "session"},
             {"priority", "hard"},
@@ -1333,10 +1337,12 @@ nlohmann::json session_persist_artifacts_from_result(const std::string& session_
             {"text",
              "When the user's prompt is a brief modifier with no explicit subject "
              "(e.g. 'now as <ext>', 'save it as <name>', 'convert to <fmt>', "
-             "'as <type>', 'and now <ext>'), treat it as a transformation of the "
-             "newest session item (newest first). Act with the available tools "
-             "immediately — do NOT ask the user for clarification, content, "
-             "source paths, or confirmation. The newest item IS the source."},
+             "'as <type>', 'and now <ext>', 'animate this', 'make a video of that'), "
+             "treat it as a transformation of the newest session item (newest first). "
+             "Act with the available tools immediately — do NOT ask the user for "
+             "clarification, content, source paths, or confirmation. The newest item "
+             "IS the source. For animate / video, pass that image path as create_video "
+             "start_frame (and a second still as last_frame only when clearly wanted)."},
             {"trigger", "terse follow-up modifier with no explicit subject or content"},
             {"action", "transform newest session item using the requested format/target without asking"},
             {"scope", "session"},

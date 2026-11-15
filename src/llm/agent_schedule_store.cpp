@@ -94,9 +94,9 @@ const char* schedule_wakeup_kind(const ScheduledTask& task) {
         return "none";
     if (task.occurrence_status == OccurrenceStatus::Blocked)
         return "none";
-    // Agent and tool tasks wake through the deferrable worker. The alarm
-    // stays a reminder. The worker runs the claim; the chat poll does not
-    // have to be the process that is alive.
+    // Agent and tool tasks wake as "work". On Android the host also arms an
+    // AlarmManager catch-up when that work is under 15 minutes away. The
+    // time_sensitive alarm stays a reminder-only path.
     if (task.execution != ExecutionKind::Notification)
         return "work";
     if (task.precision == SchedulePrecision::TimeSensitive)

@@ -180,21 +180,50 @@ struct PromptMdCacheEntry {
 std::mutex g_prompt_md_mu;
 std::unordered_map<std::string, PromptMdCacheEntry> g_prompt_md;
 
-static std::optional<std::filesystem::file_time_type>
-prompt_md_write_time(const std::string& uri, const std::filesystem::path& filename)
+// Profile / install-dir prompt files. On Android this is how
+// `prompts/*.android.md` (copied by PromptFiles.ensure) reach the agent —
+// FEATURE_SECURE_STORAGE alone never sees those plaintext profile files.
+static PromptFileLoad load_prompt_md_from_filesystem(const std::filesystem::path& filename)
 {
     namespace fs = std::filesystem;
-#if FEATURE_SECURE_STORAGE
-    (void)filename;
-    if (uri.empty())
-        return std::nullopt;
-    try {
-        const auto paths = pm::storage::resolve_storage_paths(media::settings::get_config_dir());
-        return pm::storage::document_write_time(paths, uri);
-    } catch (...) {
-        return std::nullopt;
-    }
+    auto read_md = [](const fs::path& file) -> PromptFileLoad {
+        std::error_code ec;
+        if (!fs::is_regular_file(file, ec)) return {};
+        std::ifstream in;
+#if defined(__ANDROID__)
+        // ifstream(fs::path) does not open under the Android app data dir.
+        in.open(file.c_str(), std::ios::binary);
 #else
+        in.open(file, std::ios::binary);
+#endif
+        if (!in) return {};
+        std::ostringstream oss;
+        oss << in.rdbuf();
+        PromptFileLoad out;
+        out.content = trim_system_prompt_utf8(std::move(oss.str()));
+        out.path = file;
+        return out;
+    };
+    auto try_dir = [&](const fs::path& dir) -> PromptFileLoad {
+        if (dir.empty()) return {};
+#if defined(__ANDROID__)
+        const std::string alias = android_prompt_filename(filename);
+        if (!alias.empty()) {
+            if (PromptFileLoad p = read_md(dir / alias); !p.content.empty())
+                return p;
+        }
+#endif
+        return read_md(dir / filename);
+    };
+    if (PromptFileLoad p = try_dir(media::app::exe_parent_directory()); !p.content.empty())
+        return p;
+    return try_dir(system_prompt_config_parent() / "prompts");
+}
+
+static std::optional<std::filesystem::file_time_type>
+prompt_md_filesystem_write_time(const std::filesystem::path& filename)
+{
+    namespace fs = std::filesystem;
     auto probe_one = [](const fs::path& file) -> std::optional<fs::file_time_type> {
         std::error_code ec;
         if (!fs::is_regular_file(file, ec))
@@ -219,13 +248,41 @@ prompt_md_write_time(const std::string& uri, const std::filesystem::path& filena
     if (auto t = probe(media::app::exe_parent_directory()))
         return t;
     return probe(system_prompt_config_parent() / "prompts");
+}
+
+static std::optional<std::filesystem::file_time_type>
+prompt_md_write_time(const std::string& uri, const std::filesystem::path& filename)
+{
+#if defined(__ANDROID__)
+    // Phone profile prompts win over the secure-store URI (which may be empty
+    // or hold a desktop seed). Cache invalidation follows the file on disk.
+    if (auto t = prompt_md_filesystem_write_time(filename))
+        return t;
+#endif
+#if FEATURE_SECURE_STORAGE
+    if (uri.empty())
+        return std::nullopt;
+    try {
+        const auto paths = pm::storage::resolve_storage_paths(media::settings::get_config_dir());
+        return pm::storage::document_write_time(paths, uri);
+    } catch (...) {
+        return std::nullopt;
+    }
+#else
+    return prompt_md_filesystem_write_time(filename);
 #endif
 }
 
 static PromptFileLoad load_prompt_md_uncached(const std::filesystem::path& filename,
                                               const std::string& uri)
 {
-    namespace fs = std::filesystem;
+#if defined(__ANDROID__)
+    // PromptFiles.ensure writes `<profile>/prompts/*.android.md`. Those are the
+    // phone system / planner / realtime injects. Load them before secure storage
+    // so a missing or desktop-shaped seed cannot win.
+    if (PromptFileLoad phone = load_prompt_md_from_filesystem(filename); !phone.content.empty())
+        return phone;
+#endif
 #if FEATURE_SECURE_STORAGE
     if (!uri.empty()) {
         try {
@@ -254,32 +311,10 @@ static PromptFileLoad load_prompt_md_uncached(const std::filesystem::path& filen
             }
         } catch (...) {}
     }
-#else
-    auto read_md = [](const fs::path& file) -> PromptFileLoad {
-        std::error_code ec;
-        if (!fs::is_regular_file(file, ec)) return {};
-        std::ifstream in(file, std::ios::binary);
-        if (!in) return {};
-        std::ostringstream oss;
-        oss << in.rdbuf();
-        PromptFileLoad out;
-        out.content = trim_system_prompt_utf8(std::move(oss.str()));
-        out.path = file;
-        return out;
-    };
-    auto try_dir = [&](const fs::path& dir) -> PromptFileLoad {
-        if (dir.empty()) return {};
-#if defined(__ANDROID__)
-        const std::string alias = android_prompt_filename(filename);
-        if (!alias.empty()) {
-            if (PromptFileLoad p = read_md(dir / alias); !p.content.empty())
-                return p;
-        }
 #endif
-        return read_md(dir / filename);
-    };
-    if (PromptFileLoad p = try_dir(media::app::exe_parent_directory()); !p.content.empty()) return p;
-    if (PromptFileLoad p = try_dir(system_prompt_config_parent() / "prompts"); !p.content.empty()) return p;
+#if !defined(__ANDROID__)
+    if (PromptFileLoad p = load_prompt_md_from_filesystem(filename); !p.content.empty())
+        return p;
 #endif
     return {};
 }
