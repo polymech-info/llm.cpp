@@ -279,6 +279,8 @@ bool TranslationSession::open(const Config& cfg, Callbacks cb, std::string& err)
 void TranslationSession::Impl::reader_loop() {
     std::vector<char> tmp(65536);
     std::string frame_buf;
+    // Cap reassembly so a runaway CONT stream cannot grow without bound.
+    constexpr std::size_t kMaxMessageBytes = 8u * 1024u * 1024u;
 
     while (!stop_flag.load()) {
         size_t nrecvd = 0;
@@ -295,27 +297,66 @@ void TranslationSession::Impl::reader_loop() {
         }
         if (rc != CURLE_OK) {
             if (!stop_flag.load()) {
-                const std::string recv_err = std::string("recv failed: ") + curl_easy_strerror(rc);
-                emit_error(recv_err);
-                const bool is_net_drop = (rc == CURLE_OPERATION_TIMEDOUT ||
-                                          rc == CURLE_SEND_ERROR         ||
-                                          rc == CURLE_RECV_ERROR         ||
-                                          rc == CURLE_COULDNT_CONNECT);
-                if (is_net_drop && cb.on_network_error)
-                    cb.on_network_error("Connection lost — check your internet connection");
+                // libcurl often surfaces a peer TCP/WS teardown as
+                // CURLE_UNSUPPORTED_PROTOCOL ("Unsupported protocol") — not a
+                // missing ws:// build (connect already succeeded).
+                const bool peer_gone =
+                    rc == CURLE_UNSUPPORTED_PROTOCOL ||
+                    rc == CURLE_GOT_NOTHING ||
+                    rc == CURLE_PARTIAL_FILE ||
+                    rc == CURLE_RECV_ERROR ||
+                    rc == CURLE_SEND_ERROR ||
+                    rc == CURLE_OPERATION_TIMEDOUT ||
+                    rc == CURLE_COULDNT_CONNECT;
+                if (peer_gone) {
+                    logger::warn(std::string("TranslationSession: websocket peer closed (")
+                                 + curl_easy_strerror(rc) + ")");
+                    if (cb.on_network_error)
+                        cb.on_network_error("Translation connection closed by peer");
+                } else {
+                    emit_error(std::string("recv failed: ") + curl_easy_strerror(rc));
+                }
             }
             break;
         }
-        if (meta && (meta->flags & CURLWS_CLOSE))
+        if (meta && (meta->flags & CURLWS_CLOSE)) {
+            if (nrecvd >= 2) {
+                const unsigned code = (static_cast<unsigned char>(tmp[0]) << 8)
+                                    | static_cast<unsigned char>(tmp[1]);
+                std::string reason;
+                if (nrecvd > 2)
+                    reason.assign(tmp.data() + 2, nrecvd - 2);
+                tr_log("TranslationSession: WS CLOSE code=" + std::to_string(code)
+                       + (reason.empty() ? "" : (" reason=" + reason)));
+            } else {
+                tr_log("TranslationSession: WS CLOSE");
+            }
             break;
+        }
+        // Control frames must not be merged into the JSON message buffer.
+        if (meta && (meta->flags & (CURLWS_PING | CURLWS_PONG)))
+            continue;
 
-        if (nrecvd > 0) frame_buf.append(tmp.data(), nrecvd);
+        if (nrecvd > 0) {
+            if (frame_buf.size() + nrecvd > kMaxMessageBytes) {
+                logger::error("TranslationSession: WS message exceeds "
+                              + std::to_string(kMaxMessageBytes) + " B — dropping");
+                frame_buf.clear();
+                continue;
+            }
+            frame_buf.append(tmp.data(), nrecvd);
+        }
+        // bytesleft==0 → this frame chunk is complete. CURLWS_CONT means more
+        // fragments belong to the same message — keep accumulating.
         if (meta && meta->bytesleft == 0 && !frame_buf.empty()) {
-            const auto j = nlohmann::json::parse(frame_buf, nullptr, false);
-            if (j.is_object()) dispatch_event(j);
-            else logger::warn("TranslationSession: non-object frame ("
-                              + std::to_string(frame_buf.size()) + " B)");
-            frame_buf.clear();
+            const bool cont = (meta->flags & CURLWS_CONT) != 0;
+            if (!cont) {
+                const auto j = nlohmann::json::parse(frame_buf, nullptr, false);
+                if (j.is_object()) dispatch_event(j);
+                else logger::warn("TranslationSession: non-object frame ("
+                                  + std::to_string(frame_buf.size()) + " B)");
+                frame_buf.clear();
+            }
         }
     }
 
@@ -384,6 +425,10 @@ void TranslationSession::Impl::dispatch_event(const nlohmann::json& j) {
         stop_flag.store(true);
         return;
     }
+
+    // Surface anything else so silent protocol drift is visible in logs.
+    if (!typ.empty())
+        logger::debug("TranslationSession: unhandled event type=" + typ);
 }
 
 void TranslationSession::send_pcm(const int16_t* pcm, size_t frame_count) {
