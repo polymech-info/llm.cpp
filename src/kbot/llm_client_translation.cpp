@@ -117,16 +117,15 @@ std::string translation_ws_url(const std::string& base_url) {
 }
 
 nlohmann::json make_session_update(const TranslationSession::Config& cfg) {
+    // Wire shape from OpenAI realtime-translation docs / cookbook:
+    //   session.audio.output.language (required)
+    //   session.audio.input.noise_reduction / transcription (optional)
+    // Model and PCM rate are NOT session.update fields — model is ?model= on the
+    // URL; audio is always 24 kHz PCM16 on this endpoint.
     nlohmann::json audio = nlohmann::json::object();
-    nlohmann::json output;
-    output["language"] = cfg.language;
-    if (cfg.output_rate > 0)
-        output["format"] = { {"type", "audio/pcm"}, {"rate", cfg.output_rate} };
-    audio["output"] = output;
+    audio["output"] = { {"language", cfg.language} };
 
     nlohmann::json input = nlohmann::json::object();
-    if (cfg.input_rate > 0)
-        input["format"] = { {"type", "audio/pcm"}, {"rate", cfg.input_rate} };
     if (!cfg.noise_reduction.empty())
         input["noise_reduction"] = { {"type", cfg.noise_reduction} };
     if (!cfg.transcription_model.empty())
@@ -134,11 +133,7 @@ nlohmann::json make_session_update(const TranslationSession::Config& cfg) {
     if (!input.empty())
         audio["input"] = input;
 
-    nlohmann::json session;
-    session["audio"] = audio;
-    if (!cfg.model.empty())
-        session["model"] = cfg.model;
-    return { {"type", "session.update"}, {"session", session} };
+    return { {"type", "session.update"}, {"session", { {"audio", audio} }} };
 }
 
 } // namespace
