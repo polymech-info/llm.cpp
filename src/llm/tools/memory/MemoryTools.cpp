@@ -281,15 +281,17 @@ ExecuteResult do_memory_read(const nlohmann::json& args) {
     // Explicit task_id → read scheduler/session task-store entry.
     if (!id.empty()) {
         const auto task = media::llm::agent::task_store_get(id);
-        if (!task)
+        const auto session = task ? std::nullopt : media::llm::agent::session_memory_get(id);
+        const auto* found = task ? &*task : (session ? &*session : nullptr);
+        if (!found)
             return simple_error("memory_read: task not found: " + id);
-        const bool empty = task->memory_state.empty() ||
-                           (task->memory_state.is_object() && task->memory_state.empty());
+        const bool empty = found->memory_state.empty() ||
+                           (found->memory_state.is_object() && found->memory_state.empty());
         ExecuteResult r;
         r.ok = true;
         r.envelope = nlohmann::json{
             {"ok",      true},
-            {"state",   task->memory_state},
+            {"state",   found->memory_state},
             {"source",  "task"},
             {"message", empty ? "No facts stored yet. Use memory_write to save some."
                               : "Memory loaded successfully."},
@@ -329,7 +331,10 @@ ExecuteResult do_memory_write(const nlohmann::json& args) {
 
     // Explicit task_id → write into scheduler/session task-store entry.
     if (!id.empty()) {
-        if (!media::llm::agent::task_store_write_memory(id, args["state"]))
+        const bool saved = media::llm::agent::task_store_get(id)
+            ? media::llm::agent::schedule_write_memory(id, args["state"])
+            : media::llm::agent::session_write_memory(id, args["state"]);
+        if (!saved)
             return simple_error("memory_write: task context not found: " + id);
         ExecuteResult r;
         r.ok = true;
@@ -373,7 +378,10 @@ ExecuteResult do_memory_append_event(const nlohmann::json& args) {
 
     nlohmann::json ev = args["event"];
     if (!ev.contains("time")) ev["time"] = media::llm::agent::now_iso8601();
-    media::llm::agent::task_store_append_event(id, ev);
+    if (media::llm::agent::current_task_is_schedule())
+        media::llm::agent::schedule_append_event(id, ev);
+    else
+        media::llm::agent::session_append_event(id, ev);
     return simple_ok(nlohmann::json{{"task_id", id}});
 }
 

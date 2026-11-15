@@ -1,134 +1,37 @@
 #pragma once
 //
-// media::llm::agent — task store + scheduler memory + persisted chat sessions
+// Chat session memory, journals, and snapshots.
+// Scheduled tasks live in agent_schedule_store.hpp. Paths and clocks live in
+// agent_store_io.hpp. This header includes both so existing callers keep
+// compiling.
 //
-// Scheduler tasks are saved on disk and reloaded the next time the store is
-// used. The in-process scheduler thread fires them while the process is up.
-// A task that comes due while the process is down runs once on the next start.
-// Repeating tasks do not replay missed intervals.
-//
-// Chat sessions are persisted to disk so that:
-//   * the chat panel's in-app session survives restarts, and
-//   * separate CLI invocations sharing a --session-id can read/write the same
-//     memory_state and event log (cross-process A2A scenarios).
-//
-// Disk layout:
-//     <session_store_dir>/<sanitized-session-id>.json
-//     <parent of session_store_dir>/schedules/<sanitized-task-id>.json
-//
-// Override the directory via:
-//   * set_session_store_dir(path) — in-process override (tests).
-//   * PM_IMAGE_SESSION_DIR env var — process-wide override (test harness).
-//   * default: <roaming_config_dir>/sessions (next to settings.json).
-//
-// Thread-safe: all task_store_* functions lock a single global mutex.
-// Disk writes happen while the mutex is held (atomic .tmp + rename).
-// set/get/clear_current_task_id use thread_local so the scheduler thread and
-// the UI thread never see each other's active task.
-//
+#include "agent_schedule_store.hpp"
+#include "agent_store_io.hpp"
+
 #include <nlohmann/json.hpp>
 
-#include <chrono>
 #include <filesystem>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace media::llm::agent {
 
-enum class ScheduleKind {
-    At,     // absolute one-shot   — run_at
-    In,     // relative one-shot   — delay
-    Every,  // repeating interval  — interval [+ start_at] [+ max_runs]
-};
-
-struct ScheduleSpec {
-    ScheduleKind kind = ScheduleKind::Every;
-
-    // At
-    std::optional<std::chrono::system_clock::time_point> run_at;
-
-    // In
-    std::optional<std::chrono::seconds> delay;
-
-    // Every
-    std::optional<std::chrono::seconds> interval;
-    std::optional<std::chrono::system_clock::time_point> start_at;
-    std::optional<int> max_runs;
-};
-
-struct ScheduledTask {
-    // ── definition ────────────────────────────────────────────────────────────
-    std::string  id;
-    std::string  title;
-    std::string  prompt;
-    ScheduleSpec schedule;
-    bool         enabled    = true;
-    std::string  created_at;
-    std::string  updated_at;
-    std::string  folder_hint;   // optional — injected into scheduled Turn
-
-    // ── runtime state ─────────────────────────────────────────────────────────
-    std::optional<std::chrono::system_clock::time_point> next_run_at;
-    std::optional<std::chrono::system_clock::time_point> last_run_at;
-    int         run_count            = 0;
-    std::string last_error;
-    int         consecutive_failures = 0;
-
-    // ── memory (compact JSON kept small) ─────────────────────────────────────
-    nlohmann::json memory_state = nlohmann::json::object();
-
-    // ── event log (append-only, capped at k_max_events) ──────────────────────
-    std::vector<nlohmann::json> events;
-};
-
-// ── Store API (all thread-safe) ──────────────────────────────────────────────
-
-/// Assigns a unique id if task.id is empty. Returns the id.
-std::string task_store_create(ScheduledTask task);
-
-std::optional<ScheduledTask> task_store_get(const std::string& id);
-std::vector<ScheduledTask>   task_store_list();
-
-/// Full replacement (id must exist). Returns false if not found.
-bool task_store_update(const ScheduledTask& task);
-
-/// Mark as disabled (does not erase). Returns false if not found.
-bool task_store_cancel(const std::string& id);
-
-/// Erase every scheduler task from memory and delete `schedules/*.json`.
-/// Does not touch chat sessions. Callers that only need a reload use
-/// `task_store_drop_cache`.
-void task_store_clear_all();
-
-/// Forget the in-memory task map. The next get/list/create reloads
-/// `schedules/*.json`. Does not delete files.
-void task_store_drop_cache();
-
-/// Remove one scheduler task from memory and delete its schedule file.
-bool task_store_erase(const std::string& id);
-
-/// Create one far-future task, reload it from disk, cancel it, and erase it.
-/// Other tasks in the current schedule directory are left alone.
-nlohmann::json scheduler_persistence_selftest();
-
-/// Merge compact state JSON into the task's memory slot. Empty object clears all memory;
-/// null values delete individual keys.
-bool task_store_write_memory(const std::string& task_id, const nlohmann::json& state);
-
 /// Merge non-memory metadata into a persisted chat/agent session JSON.
 bool session_write_meta(const std::string& session_id, const nlohmann::json& patch);
 
-/// Append an event object; trims to k_max_events.
-void task_store_append_event(const std::string& task_id, const nlohmann::json& event);
+/// Merge compact state into a chat session. Creates the session record when
+/// the id is not on disk yet. Does not look at the schedule store.
+bool session_write_memory(const std::string& session_id, const nlohmann::json& state);
+void session_append_event(const std::string& session_id, const nlohmann::json& event);
+std::optional<ScheduledTask> session_memory_get(const std::string& id);
+void session_store_invalidate();
 
-// ── Per-turn task context (thread_local) ────────────────────────────────────
-
-/// Set before run_turn for a scheduled tick so memory_write knows its target.
 void        set_current_task_id(const std::string& id);
 void        clear_current_task_id();
 std::string get_current_task_id();
+void        set_current_task_is_schedule(bool schedule);
+bool        current_task_is_schedule();
 
 // ── Session memory (chat-panel lifetime, cross-turn) ────────────────────────
 
@@ -170,37 +73,17 @@ std::filesystem::path session_journal_path(const std::string& session_id);
 /// empty array when the journal is absent / unreadable.
 nlohmann::json session_journal_read(const std::string& session_id);
 
+/// Session ids that have a persisted memory file, sorted.
+std::vector<std::string> session_list_persisted();
+
+/// Drop the in-memory session and delete its JSON and journal. Pending
+/// schedule deliveries are not touched.
+bool session_delete(const std::string& session_id);
+
 /// Read only the persisted memory_state blob for a session (no event log,
 /// no journal recovery). Used internally to avoid recursive session_load.
 bool session_read_memory_state(const std::string& session_id,
                                nlohmann::json& out_memory_state);
-
-// ── Session-disk persistence ────────────────────────────────────────────────
-
-/// Directory where session JSON files live. Created on demand.
-std::filesystem::path session_store_dir();
-
-/// Directory where scheduler task JSON files live. Sibling of the session
-/// directory (`<parent>/schedules`). Not created until a task is saved.
-std::filesystem::path schedule_store_dir();
-
-/// Override the session-store directory for the rest of the process (tests).
-/// Pass an empty path to clear the override and fall back to env/roaming.
-void set_session_store_dir(const std::filesystem::path& dir);
-
-/// Filename stem for a session id. Safe ids (alphanumerics, `_`, `-`, `.`,
-/// no `..`, at most 80 bytes) are unchanged. Empty returns empty. Any other id
-/// gets a hash suffix so distinct ids cannot share one file.
-std::string sanitize_session_id(const std::string& id);
-
-/// Names of every persisted session on disk (sorted). Returns sanitized ids
-/// (the filename stem) — these are what session_get_or_create / session_delete
-/// expect.
-std::vector<std::string> session_list_persisted();
-
-/// Delete a persisted session file AND drop the in-memory cache entry.
-/// Returns true if anything was removed.
-bool session_delete(const std::string& session_id);
 
 // ── Named session snapshots (P12) ───────────────────────────────────────────
 //
@@ -229,20 +112,5 @@ bool session_snapshot_save(const std::string& session_id,
 bool session_snapshot_load(const std::string& snapshot_name,
                            nlohmann::json& out_memory_state,
                            nlohmann::json& out_recent_events);
-
-// ── Serialization helpers ────────────────────────────────────────────────────
-
-/// Full JSON (for memory_read, scheduler internal use).
-nlohmann::json task_to_json(const ScheduledTask& t);
-
-/// Compact summary JSON (for schedule_list).
-nlohmann::json task_to_summary_json(const ScheduledTask& t);
-
-/// Current UTC time as "YYYY-MM-DDTHH:MM:SSZ".
-std::string now_iso8601();
-
-/// Parse "YYYY-MM-DDTHH:MM:SS" with an optional fractional second and a `Z`
-/// or `±HH:MM` offset. A missing suffix is UTC. A malformed suffix is rejected.
-std::optional<std::chrono::system_clock::time_point> parse_iso8601(const std::string& s);
 
 } // namespace media::llm::agent

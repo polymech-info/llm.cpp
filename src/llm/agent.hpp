@@ -353,10 +353,9 @@ struct Event {
         TextDelta,
         AssistantText,      // model produced final text; text = the response
         MemoryUpdate,       // session memory changed; payload = compact patch / counts
-        /// Planner confidence fell below the clarification threshold (< 0.4).
-        /// payload = { "confidence": float, "intent": str, "reason": str }
-        /// The turn still proceeds — callers may use this to surface an inline
-        /// hint or ask the user to confirm before committing to a tool call.
+        /// Planner confidence fell below 0.4. payload includes
+        /// signal=low_confidence_warning and awaiting_user_input=false.
+        /// The turn still proceeds. This event does not pause tool execution.
         ClarificationNeeded,
         /// A tool call returned ok=false and the whole turn failed / was
         /// cancelled without a successful recovery. Written to session memory

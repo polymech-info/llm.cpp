@@ -61,6 +61,8 @@ function(pm_llm_sources group out_var)
       "${_s}/agent_skills.cpp"
       "${_s}/skills/skillshub.cpp"
       "${_s}/agent_memory.cpp"
+      "${_s}/agent_store_io.cpp"
+      "${_s}/agent_schedule_store.cpp"
       "${_s}/agent_memory_artifacts.cpp"
       "${_s}/agent_scheduler.cpp"
       "${_s}/chat_session_store.cpp"
@@ -190,6 +192,8 @@ function(pm_llm_sources group out_var)
       "${_s}/mcp_tools_cache.cpp"
       "${_s}/chat_session_store.cpp"
       "${_s}/agent_memory.cpp"
+      "${_s}/agent_store_io.cpp"
+      "${_s}/agent_schedule_store.cpp"
       "${_s}/agent_memory_artifacts.cpp")
   elseif(group STREQUAL "android")
     set(_files
@@ -209,6 +213,8 @@ function(pm_llm_sources group out_var)
       "${_s}/agent_runner_mcp.cpp"
       "${_s}/realtime_agent_bridge.cpp"
       "${_s}/agent_memory.cpp"
+      "${_s}/agent_store_io.cpp"
+      "${_s}/agent_schedule_store.cpp"
       "${_s}/agent_scheduler.cpp"
       "${_s}/tools/scheduler/SchedulerTools.cpp"
       "${_s}/agent_memory_artifacts.cpp"

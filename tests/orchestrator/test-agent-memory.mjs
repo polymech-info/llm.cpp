@@ -6,7 +6,7 @@ import { llmExe } from './exe.mjs';
  * Invoked via:
  *   npm run test:agent:memory:harness              # loopback (default)
  *   npm run test:agent:memory:harness:live         # live + quick preset
- *   npm run test:agent:memory:harness:live -- --preset superfast
+ *   npm run test:agent:memory:harness:live -- --preset local
  *   npm run test:agent:memory:harness:live:local-gemma
  *
  * Shared bootstrap lives in ./test-agent-commons.mjs

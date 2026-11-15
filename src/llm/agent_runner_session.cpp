@@ -75,7 +75,7 @@ void external_session_store(const std::string& pixlwiz_session_id,
         {"external_agents",
          {{runner_storage_key(runner), {{"session_id", external_session_id}}}}},
     };
-    (void)task_store_write_memory(pixlwiz_session_id, patch);
+    (void)session_write_memory(pixlwiz_session_id, patch);
 }
 
 std::string extract_external_session_id(const Result& result)

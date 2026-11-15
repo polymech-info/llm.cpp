@@ -43,8 +43,10 @@
 #include "llm_client.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -84,6 +86,40 @@ void android_disable_stub_path_tools(std::vector<std::string>& names)
 #endif
 }
 
+// One resolved disable list for the catalog and the runtime blocklist.
+// PathScopeFeature calls this before PathToolBlocklistScope copies the vector.
+// ToolsFeature calls it again; global policy and the GPO merge are idempotent.
+void resolve_turn_tool_policy(Turn& turn)
+{
+#if FEATURE_HOME_LLM_TOOLS
+    if (!turn.tool_policy_override_set) {
+        std::string gerr;
+        media::runtime_settings::apply_global_tool_policy_to_values(
+            turn.disabled_path_tools, turn.mcp_tools_enabled, turn.disabled_mcp_servers, gerr);
+        if (!gerr.empty())
+            logger::warn(std::string("agent tools: global policy load: ") + gerr);
+    }
+#if defined(FEATURE_WINDOWS_GPO) && FEATURE_WINDOWS_GPO
+    for (auto& t : pm::policy::policy_disabled_tools()) {
+        if (std::find(turn.disabled_path_tools.begin(),
+                      turn.disabled_path_tools.end(), t)
+                == turn.disabled_path_tools.end())
+            turn.disabled_path_tools.push_back(std::move(t));
+    }
+#endif
+    android_disable_stub_path_tools(turn.disabled_path_tools);
+    std::vector<std::string> valid;
+    valid.reserve(turn.disabled_path_tools.size());
+    for (const auto& n : turn.disabled_path_tools) {
+        if (pm::llm::agent_tool_find_by_name(n))
+            valid.push_back(n);
+    }
+    turn.disabled_path_tools = std::move(valid);
+#else
+    turn.disabled_path_tools.clear();
+#endif
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // PathScopeFeature
 //   Pins the path-tool base directory and installs the disabled-tool blocklist
@@ -107,23 +143,9 @@ public:
     FeaturePhase phase() const noexcept override { return FeaturePhase::Scope; }
     const char* name() const noexcept override { return "path_scope"; }
     void on_prepare(Turn& turn, const ProviderSettings& provider, PreparedRun& run) override {
-#if FEATURE_HOME_LLM_TOOLS
-        android_disable_stub_path_tools(turn.disabled_path_tools);
-        // Validate disable-lists before constructing scope guards.
-        // PathScopeGuard is created before ToolsFeature, so unknown IDs must be
-        // pruned here (not only later in ToolsFeature) to keep blocklist setup safe.
-        if (!turn.disabled_path_tools.empty()) {
-            std::vector<std::string> valid;
-            valid.reserve(turn.disabled_path_tools.size());
-            for (const auto& n : turn.disabled_path_tools) {
-                if (pm::llm::agent_tool_find_by_name(n))
-                    valid.push_back(n);
-            }
-            turn.disabled_path_tools = std::move(valid);
-        }
-#else
-        turn.disabled_path_tools.clear();
-#endif
+        // Global settings, Group Policy, and phone stubs land in the same
+        // vector the blocklist scope copies. ToolsFeature reads that vector.
+        resolve_turn_tool_policy(turn);
         run.add_scope(std::make_unique<PathScopeGuard>(turn, provider));
     }
 };
@@ -630,10 +652,9 @@ public:
 
         // ── P2: confidence gate ───────────────────────────────────────────────
         // When the planner ran (fallback=false) and returned confidence < 0.4,
-        // emit a ClarificationNeeded event.  The turn still proceeds — the
-        // system prompt already injects a low-confidence warning (via
-        // agent_context.cpp) — but callers may intercept this event to surface
-        // an inline hint or ask the user to confirm before acting.
+        // emit ClarificationNeeded as a low-confidence warning. The turn still
+        // proceeds. This is not an awaiting-user state and does not authorize
+        // or block tools.
         if (!turn.planner_meta.value("fallback", true)) {
             const float conf = turn.planner_meta.value("confidence", 1.0f);
             if (conf < 0.4f) {
@@ -643,6 +664,8 @@ public:
                 payload["action"]     = turn.planner_meta.value("action",  std::string{});
                 payload["subject"]    = turn.planner_meta.value("subject", std::string{});
                 payload["reason"]     = turn.planner_meta.value("reason",  std::string{});
+                payload["signal"]     = "low_confidence_warning";
+                payload["awaiting_user_input"] = false;
                 (void)detail::emit(run.cb, Event{Event::ClarificationNeeded, "", "", std::move(payload)});
             }
         }
@@ -656,31 +679,7 @@ public:
     void on_prepare(Turn& turn, const ProviderSettings& provider, PreparedRun& run) override {
         if (provider.max_iterations <= 0) return;  // text-only mode
 
-        if (!turn.tool_policy_override_set) {
-            std::string gerr;
-            media::runtime_settings::apply_global_tool_policy_to_values(
-                turn.disabled_path_tools, turn.mcp_tools_enabled, turn.disabled_mcp_servers, gerr);
-            if (!gerr.empty())
-                logger::warn(std::string("agent tools: global policy load: ") + gerr);
-        }
-#if defined(FEATURE_WINDOWS_GPO) && FEATURE_WINDOWS_GPO
-        for (auto& t : pm::policy::policy_disabled_tools()) {
-            if (std::find(turn.disabled_path_tools.begin(),
-                          turn.disabled_path_tools.end(), t)
-                    == turn.disabled_path_tools.end())
-                turn.disabled_path_tools.push_back(std::move(t));
-        }
-#endif
-        android_disable_stub_path_tools(turn.disabled_path_tools);
-        {
-            std::vector<std::string> valid;
-            valid.reserve(turn.disabled_path_tools.size());
-            for (const auto& n : turn.disabled_path_tools) {
-                if (pm::llm::agent_tool_find_by_name(n))
-                    valid.push_back(n);
-            }
-            turn.disabled_path_tools = std::move(valid);
-        }
+        resolve_turn_tool_policy(turn);
 
         if (turn.planner_path_tool_allowlist_set) {
             run.tools = turn.allowed_path_tools.empty()
@@ -734,6 +733,17 @@ public:
         ctx.session_id = turn.task_id;
         ctx.cwd        = turn.folder_hint;
 
+        std::unordered_set<std::string> accepted;
+        if (run.tools.is_array()) {
+            for (const auto& existing : run.tools) {
+                if (!existing.is_object() || !existing.contains("function"))
+                    continue;
+                const std::string have = existing["function"].value("name", std::string{});
+                if (!have.empty())
+                    accepted.insert(media::strutil::lower_ascii(have));
+            }
+        }
+
         nlohmann::json schemas = nlohmann::json::array();
         for (const auto& provider_ptr : run.host_providers) {
             if (!provider_ptr)
@@ -741,20 +751,8 @@ public:
             for (const auto& def : provider_ptr->tools()) {
                 if (def.name.empty())
                     continue;
-                bool clash = false;
-                if (run.tools.is_array()) {
-                    for (const auto& existing : run.tools) {
-                        if (!existing.is_object() || !existing.contains("function"))
-                            continue;
-                        const std::string have =
-                            existing["function"].value("name", std::string{});
-                        if (host_tool_name_eq(have, def.name)) {
-                            clash = true;
-                            break;
-                        }
-                    }
-                }
-                if (clash) {
+                const std::string key = media::strutil::lower_ascii(def.name);
+                if (!accepted.insert(key).second) {
                     logger::warn(std::string("host tool provider '") + provider_ptr->id()
                                  + "' tool '" + def.name
                                  + "' collides with an existing agent tool — skipped");
@@ -901,12 +899,24 @@ public:
 // ═══════════════════════════════════════════════════════════════════════════════
 
 struct TaskIdGuard : FeatureScope {
-    bool active;
-    explicit TaskIdGuard(const std::string& id) : active(!id.empty()) {
-        if (active) set_current_task_id(id);
+    bool active = false;
+    std::string previous_id;
+    bool previous_schedule = false;
+    explicit TaskIdGuard(const std::string& id, bool schedule) {
+        if (id.empty()) return;
+        active = true;
+        previous_id = get_current_task_id();
+        previous_schedule = current_task_is_schedule();
+        set_current_task_id(id);
+        set_current_task_is_schedule(schedule);
     }
     ~TaskIdGuard() override {
-        if (active) clear_current_task_id();
+        if (!active) return;
+        if (previous_id.empty())
+            clear_current_task_id();
+        else
+            set_current_task_id(previous_id);
+        set_current_task_is_schedule(previous_schedule);
     }
 };
 
@@ -915,12 +925,15 @@ public:
     FeaturePhase phase() const noexcept override { return FeaturePhase::Context; }
     const char* name() const noexcept override { return "memory"; }
     void on_prepare(Turn& turn, const ProviderSettings& provider, PreparedRun& run) override {
-        run.add_scope(std::make_unique<TaskIdGuard>(turn.task_id));
+        run.add_scope(std::make_unique<TaskIdGuard>(turn.task_id, turn.is_scheduled_tick));
     }
 
     void on_finish(const Turn& turn, const Result& result, const PreparedRun& run) override {
         if (turn.task_id.empty() || turn.structured_memory_features == 0)
             return;
+        // Prepare scopes are already gone. Restore the schedule-vs-session
+        // route for artifact writes that consult the thread-local task.
+        TaskIdGuard memory_scope(turn.task_id, turn.is_scheduled_tick);
 
         const bool emit_updates = pm::llm::has_feature(
             turn.structured_memory_features, pm::llm::StructuredMemoryFeature::EmitMemoryUpdate);
@@ -971,6 +984,7 @@ public:
     void on_finish(const Turn& turn, const Result& result, const PreparedRun& run) override {
         if (turn.task_id.empty() || turn.structured_memory_features == 0 || !result.ok)
             return;
+        TaskIdGuard memory_scope(turn.task_id, turn.is_scheduled_tick);
         nlohmann::json update = session_persist_tool_checkpoints_from_result(
             turn.task_id, result,
             turn.source_log_session_id, turn.source_log_id, turn.source_log_path);
@@ -1018,6 +1032,7 @@ public:
             return;
         if (!result.ok)
             return;
+        TaskIdGuard memory_scope(turn.task_id, turn.is_scheduled_tick);
 
         using SMF = pm::llm::StructuredMemoryFeature;
         const bool index = pm::llm::has_feature(turn.structured_memory_features, SMF::IndexMemoryEntries);
@@ -1622,10 +1637,21 @@ void apply_planner_tool_selection(Turn& turn, const ProviderSettings& provider)
         }
     }
 
+    auto note_planner_failure = [&](const std::string& reason) {
+        logger::warn(std::string("agent planner: ") + reason);
+        if (effective_strategy == PlannerStrategy::IntentOnly) {
+            turn.planner_meta["strategy"] = "intent_only";
+            turn.planner_meta["fallback"] = true;
+            turn.planner_meta["failure_safety_net"] = true;
+            turn.planner_meta["reason"] = reason;
+            return;
+        }
+        pin_planner_tool_safety_net(turn, /*is_fallback=*/true, reason, "failure_safety_net");
+    };
+
     if (!resp.success) {
         const std::string reason = planner_short_reason("planner LLM error: " + resp.error);
-        logger::warn(std::string("agent planner: ") + reason);
-        pin_planner_tool_safety_net(turn, /*is_fallback=*/true, reason, "failure_safety_net");
+        note_planner_failure(reason);
         return;
     }
 
@@ -1642,16 +1668,14 @@ void apply_planner_tool_selection(Turn& turn, const ProviderSettings& provider)
         if (rescued.empty()) {
             const std::string reason = planner_short_reason(
                 "planner JSON parse failed (no selection block in reply)");
-            logger::warn(std::string("agent planner: ") + reason);
-            pin_planner_tool_safety_net(turn, /*is_fallback=*/true, reason, "failure_safety_net");
+            note_planner_failure(reason);
             return;
         }
         doc = media::json::try_parse(rescued);
         if (doc.is_discarded()) {
             const std::string reason = planner_short_reason(
                 "planner JSON parse failed (invalid selection block)");
-            logger::warn(std::string("agent planner: ") + reason);
-            pin_planner_tool_safety_net(turn, /*is_fallback=*/true, reason, "failure_safety_net");
+            note_planner_failure(reason);
             return;
         }
         turn.planner_meta["rescued_from_multiblock"] = true;
@@ -1662,8 +1686,7 @@ void apply_planner_tool_selection(Turn& turn, const ProviderSettings& provider)
     if (!doc.is_object()) {
         const std::string reason = planner_short_reason(
             "planner JSON parse failed (selection was not an object)");
-        logger::warn(std::string("agent planner: ") + reason);
-        pin_planner_tool_safety_net(turn, /*is_fallback=*/true, reason, "failure_safety_net");
+        note_planner_failure(reason);
         return;
     }
 
@@ -1843,16 +1866,21 @@ void apply_planner_tool_selection(Turn& turn, const ProviderSettings& provider)
     if (selected_has("app_batch")) {
         const auto before = selected;
         std::vector<std::string> collapsed;
-        auto keep_once = [&](const std::string& name) {
-            if (selected_has(name) && std::find(collapsed.begin(), collapsed.end(), name) == collapsed.end())
-                collapsed.push_back(name);
+        collapsed.reserve(selected.size());
+        auto kept_app = [&](const std::string& name) {
+            return name == "app_open" || name == "app_inspect_dump"
+                || name == "app_inspect_find" || name == "app_batch"
+                || name == "app_close";
         };
-        keep_once("app_open");
-        keep_once("app_inspect_dump");
-        keep_once("app_inspect_find");
-        keep_once("app_batch");
-        keep_once("app_close");
-        if (!collapsed.empty()) {
+        for (const auto& name : selected) {
+            const bool app_tool = name.rfind("app_", 0) == 0;
+            if (app_tool && !kept_app(name))
+                continue;
+            if (std::find(collapsed.begin(), collapsed.end(), name) != collapsed.end())
+                continue;
+            collapsed.push_back(name);
+        }
+        if (collapsed != before) {
             selected = std::move(collapsed);
             turn.planner_meta["tool_selection_before_batch_collapse"] = before;
             turn.planner_meta["selected_tools"] = selected;
@@ -1990,28 +2018,59 @@ void apply_planner_tool_selection(Turn& turn, const ProviderSettings& provider)
         return true;
     };
     ensure_memory_find_for_payload();
-    if (prompt_asks_raster_edit(turn.user_prompt) && !selected_has("image_transform")
-            && pm::llm::agent_tool_find_by_name("image_transform")) {
-        auto make_room = [&]() {
-            if (static_cast<int>(selected.size()) < budget)
-                return;
+    auto try_add_tool = [&](const std::string& name, auto keep) -> bool {
+        if (selected_has(name))
+            return true;
+        if (static_cast<int>(selected.size()) >= budget) {
             auto removable = std::find_if(selected.rbegin(), selected.rend(),
-                [](const std::string& existing) {
-                    return existing != "image_transform" && existing != "file_glob";
-                });
-            if (removable != selected.rend())
-                selected.erase(std::next(removable).base());
-        };
-        make_room();
-        selected.push_back("image_transform");
-        if (!turn_has_raster_in_scope(turn) && !selected_has("file_glob")
-                && pm::llm::agent_tool_find_by_name("file_glob")) {
-            make_room();
-            selected.push_back("file_glob");
+                [&](const std::string& existing) { return !keep(existing); });
+            if (removable == selected.rend())
+                return false;
+            selected.erase(std::next(removable).base());
         }
-        turn.planner_meta["auto_added_image_transform"] = true;
+        if (static_cast<int>(selected.size()) >= budget)
+            return false;
+        selected.push_back(name);
+        return true;
+    };
+    auto try_add_group = [&](std::initializer_list<const char*> names, auto keep) -> bool {
+        int need = 0;
+        for (const char* name : names)
+            if (!selected_has(name))
+                ++need;
+        if (need == 0)
+            return true;
+        int free_slots = budget - static_cast<int>(selected.size());
+        if (free_slots < 0)
+            free_slots = 0;
+        int droppable = 0;
+        for (const auto& existing : selected)
+            if (!keep(existing))
+                ++droppable;
+        if (free_slots + droppable < need)
+            return false;
+        for (const char* name : names) {
+            if (!try_add_tool(name, keep))
+                return false;
+        }
+        return true;
+    };
+    auto note_selected = [&]() {
         turn.planner_meta["selected_tools"] = selected;
         turn.planner_meta["valid_selected_tools"] = selected;
+    };
+    if (prompt_asks_raster_edit(turn.user_prompt) && !selected_has("image_transform")
+            && pm::llm::agent_tool_find_by_name("image_transform")) {
+        const auto keep_raster = [](const std::string& existing) {
+            return existing == "image_transform" || existing == "file_glob";
+        };
+        if (try_add_tool("image_transform", keep_raster)) {
+            if (!turn_has_raster_in_scope(turn)
+                    && pm::llm::agent_tool_find_by_name("file_glob"))
+                (void)try_add_tool("file_glob", keep_raster);
+            turn.planner_meta["auto_added_image_transform"] = true;
+            note_selected();
+        }
     }
     // A picked photo is a real selection, the same signal as a desktop file
     // selection. Keep image_understand on this turn so an empty paths array
@@ -2021,18 +2080,13 @@ void apply_planner_tool_selection(Turn& turn, const ProviderSettings& provider)
         [](const std::string& p) { return path_looks_like_raster(p); });
     if (picked_raster && !selected_has("image_understand")
             && pm::llm::agent_tool_find_by_name("image_understand")) {
-        if (static_cast<int>(selected.size()) >= budget) {
-            auto removable = std::find_if(selected.rbegin(), selected.rend(),
-                [](const std::string& existing) {
-                    return existing != "image_understand" && existing != "image_transform";
-                });
-            if (removable != selected.rend())
-                selected.erase(std::next(removable).base());
+        const auto keep_understand = [](const std::string& existing) {
+            return existing == "image_understand" || existing == "image_transform";
+        };
+        if (try_add_tool("image_understand", keep_understand)) {
+            turn.planner_meta["auto_added_image_understand"] = true;
+            note_selected();
         }
-        selected.push_back("image_understand");
-        turn.planner_meta["auto_added_image_understand"] = true;
-        turn.planner_meta["selected_tools"] = selected;
-        turn.planner_meta["valid_selected_tools"] = selected;
     }
     if (selected.empty()) {
         if (mark_plan_invalid(selected)) {
@@ -2062,38 +2116,23 @@ void apply_planner_tool_selection(Turn& turn, const ProviderSettings& provider)
     if (needs_exact_turn_body) {
         // The newest source is chat-only. A shell copy would silently choose an
         // older file artifact, so force materialize + write instead.
-        selected.erase(std::remove(selected.begin(), selected.end(), "run"), selected.end());
-        const auto ensure_exact_export_tool = [&](const std::string& name) {
-            if (selected_has(name)) return;
-            if (static_cast<int>(selected.size()) >= budget) {
-                auto removable = std::find_if(selected.rbegin(), selected.rend(),
-                    [](const std::string& existing) {
-                        return existing != "write_file" && existing != "memory_find";
-                    });
-                if (removable != selected.rend())
-                    selected.erase(std::next(removable).base());
-            }
-            selected.push_back(name);
+        const auto keep_export = [](const std::string& existing) {
+            return existing == "write_file" || existing == "memory_find";
         };
-        ensure_exact_export_tool("memory_find");
-        ensure_exact_export_tool("write_file");
-        turn.planner_meta["auto_routed_exact_turn_export"] = true;
-        turn.planner_meta["selected_tools"] = selected;
-        turn.planner_meta["valid_selected_tools"] = selected;
+        if (try_add_group({"memory_find", "write_file"}, keep_export)) {
+            selected.erase(std::remove(selected.begin(), selected.end(), "run"), selected.end());
+            turn.planner_meta["auto_routed_exact_turn_export"] = true;
+            note_selected();
+        }
     }
     if (needs_implicit_turn_lookup && !selected_has("memory_find")) {
-        if (static_cast<int>(selected.size()) >= budget) {
-            auto removable = std::find_if(selected.rbegin(), selected.rend(),
-                [](const std::string& existing) {
-                    return existing != "memory_find";
-                });
-            if (removable != selected.rend())
-                selected.erase(std::next(removable).base());
+        const auto keep_find = [](const std::string& existing) {
+            return existing == "memory_find";
+        };
+        if (try_add_tool("memory_find", keep_find)) {
+            turn.planner_meta["auto_added_memory_find_for_implicit_turn_lookup"] = true;
+            note_selected();
         }
-        selected.push_back("memory_find");
-        turn.planner_meta["auto_added_memory_find_for_implicit_turn_lookup"] = true;
-        turn.planner_meta["selected_tools"] = selected;
-        turn.planner_meta["valid_selected_tools"] = selected;
     }
 
     const bool has_existing_text_target = [&]() {
@@ -2109,33 +2148,20 @@ void apply_planner_tool_selection(Turn& turn, const ProviderSettings& provider)
         && (selected_has("write_file") || selected_has("file_str_replace")
             || planner_intent_late == "write");
     if (existing_file_write) {
-        auto ensure_edit_tool = [&](const char* name) {
-            if (selected_has(name))
-                return;
-            if (static_cast<int>(selected.size()) >= budget) {
-                auto removable = std::find_if(selected.rbegin(), selected.rend(),
-                    [&](const std::string& existing) {
-                        return existing != "file_search" && existing != "file_read"
-                            && existing != "file_str_replace";
-                    });
-                if (removable != selected.rend())
-                    selected.erase(std::next(removable).base());
-            }
-            if (!selected_has(name))
-                selected.push_back(name);
+        const auto keep_edit = [](const std::string& existing) {
+            return existing == "file_search" || existing == "file_read"
+                || existing == "file_str_replace";
         };
-        ensure_edit_tool("file_search");
-        ensure_edit_tool("file_read");
-        ensure_edit_tool("file_str_replace");
-        turn.planner_meta["rewrote_existing_file_edit"] = true;
-        if (detail::path_is_large_text_file(turn.editor_path)
-            || std::any_of(turn.selection.begin(), turn.selection.end(),
-                           detail::path_is_large_text_file)
-            || std::any_of(turn.open_files.begin(), turn.open_files.end(),
-                           detail::path_is_large_text_file))
-            turn.planner_meta["rewrote_large_file_edit"] = true;
-        turn.planner_meta["selected_tools"] = selected;
-        turn.planner_meta["valid_selected_tools"] = selected;
+        if (try_add_group({"file_search", "file_read", "file_str_replace"}, keep_edit)) {
+            turn.planner_meta["rewrote_existing_file_edit"] = true;
+            if (detail::path_is_large_text_file(turn.editor_path)
+                || std::any_of(turn.selection.begin(), turn.selection.end(),
+                               detail::path_is_large_text_file)
+                || std::any_of(turn.open_files.begin(), turn.open_files.end(),
+                               detail::path_is_large_text_file))
+                turn.planner_meta["rewrote_large_file_edit"] = true;
+            note_selected();
+        }
     }
 
     ensure_memory_find_for_payload();
@@ -2186,13 +2212,20 @@ public:
             ++total_tools;
             const auto& content = msg.value("content", nlohmann::json{});
             bool ok = true;
+            auto ok_flag = [](const nlohmann::json& j) -> bool {
+                if (!j.is_object())
+                    return true;
+                const auto it = j.find("ok");
+                if (it == j.end() || !it->is_boolean())
+                    return true;
+                return it->get<bool>();
+            };
             if (content.is_object()) {
-                ok = content.value("ok", true);
+                ok = ok_flag(content);
             } else if (content.is_string()) {
-                const auto parsed =
-                    media::json::try_parse(content.get<std::string>());
-                if (!parsed.is_discarded())
-                    ok = parsed.value("ok", true);
+                const auto parsed = media::json::try_parse(content.get<std::string>());
+                if (parsed.is_object())
+                    ok = ok_flag(parsed);
             }
             if (!ok) ++failed_tools;
         }
@@ -2258,12 +2291,25 @@ public:
             // Use a per-turn timestamp (seconds precision) rather than a
             // per-day date — multiple turns on the same day were silently
             // overwriting each other, leaving stale issues[] from turn N in
-            // turn N+1's record.
+            // turn N+1's record. The id below also carries a run id or counter.
             const std::string ts = now_iso8601();
             // Replace colons/dots so the id is a safe JSON key (no special chars).
             std::string ts_safe = ts;
             for (char& c : ts_safe) if (c == ':' || c == '.') c = '-';
-            const std::string item_id = "self_check_" + ts_safe;
+            // source_log_id is unique per run. The clock is only a second, so a
+            // counter keeps two checks in the same second from sharing a key.
+            static std::atomic<std::uint64_t> self_check_seq{0};
+            const auto n = self_check_seq.fetch_add(1, std::memory_order_relaxed);
+            std::string item_id = "self_check_";
+            const std::string stamp = turn.source_log_id.empty() ? ts_safe : turn.source_log_id;
+            for (char c : stamp) {
+                if (c == ':' || c == '.' || c == '/' || c == '\\')
+                    item_id.push_back('-');
+                else
+                    item_id.push_back(c);
+            }
+            item_id.push_back('_');
+            item_id += std::to_string(n);
             nlohmann::json item{
                 {"kind",                 "self_check"},
                 {"passed",               passed},
@@ -2277,7 +2323,10 @@ public:
             nlohmann::json write_state = nlohmann::json::object();
             write_state["items"]       = nlohmann::json::object();
             write_state["items"][item_id] = std::move(item);
-            task_store_write_memory(turn.task_id, write_state);
+            if (turn.is_scheduled_tick)
+                schedule_write_memory(turn.task_id, write_state);
+            else
+                session_write_memory(turn.task_id, write_state);
         }
     }
 };

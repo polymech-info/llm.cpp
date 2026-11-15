@@ -30,8 +30,10 @@ const SESSION_DIR = join(RUN_DIR, 'sessions');
 // 'warn' keeps stderr clean; full trace still lands in the --log JSON file.
 const DEFAULT_LOG_ARGS = ['--log-level', 'warn'];
 const DEFAULT_CWD_ROOT = './stemp';
-const DEFAULT_CHAT_PRESET = 'quick';
-const CHILD_AGENT_PRESET = 'superfast';
+const DEFAULT_CHAT_PRESET = '';
+// `local` is the desktop chat preset for the local model. Android does not use it.
+const LOCAL_MODEL_PRESET = 'Tanit';
+const CHILD_AGENT_PRESET = 'Tanit';
 const STREAMING_SMOKE = process.argv.includes('--streaming-smoke');
 // Live planner prompt used case-wide. Iterating on this file does NOT require
 // a rebuild: tanit-cli reads it through `--planner-prompt @<path>` and runs
@@ -655,8 +657,8 @@ const CASES = {
       'shapes per kind match the schema (answer + answer_index / answer_indices), ' +
       'and that the agent can reflect the answer back to the user.',
     options: {
-      chatPreset: 'superfast', // gpt-4o-mini: cheap + deterministic enough
-      // No planner work needed — superfast already disables it. We force the
+      chatPreset: LOCAL_MODEL_PRESET,
+      // No planner work needed — the local preset already disables it. We force the
       // tool catalog open and ask in plain English; the agent must pick the
       // right kind from the prompt and the FAQ context.
       agent: ['--single-turn'],
@@ -754,7 +756,7 @@ const CASES = {
       'If the model batches both tool calls into a single response the event ' +
       'stream must show all tool_calls before any tool_result (burst pattern).',
     options: {
-      chatPreset: 'superfast',  // gpt-4o-mini: cheap + often batches parallel calls
+      chatPreset: LOCAL_MODEL_PRESET,
       agent: ['--single-turn'],
       plannerBudget: '4',
       maxIter: '5',
@@ -825,7 +827,7 @@ const CASES = {
       'The event log must contain a self_check event with passed=true and ' +
       'deflection_detected=false, confirming the quality gate fired.',
     options: {
-      chatPreset: 'superfast',
+      chatPreset: LOCAL_MODEL_PRESET,
       agent: ['--single-turn'],
       plannerBudget: '4',
       maxIter: '5',
@@ -897,7 +899,7 @@ const CASES = {
       'P12 Named snapshot: first turn writes a file and saves a snapshot. ' +
       'Second turn loads the snapshot and must confirm the loaded context.',
     options: {
-      chatPreset: 'superfast',
+      chatPreset: LOCAL_MODEL_PRESET,
       agent: ['--multi-turn'],
       plannerBudget: '4',
       maxIter: '5',

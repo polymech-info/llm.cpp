@@ -10,7 +10,7 @@ import { llmExe } from './exe.mjs';
  * Invoked via:
  *   npm run test:agent:edit
  *   npm run test:agent:edit:live
- *   npm run test:agent:edit:live -- --preset superfast
+ *   npm run test:agent:edit:live -- --preset local
  *
  * Live uses the installed default chat preset and config-dir (no --preset /
  * --config-dir unless the caller passed --preset explicitly).

@@ -30,6 +30,19 @@ namespace fs = std::filesystem;
 namespace media::llm::agent {
 namespace {
 
+bool write_turn_memory(const std::string& id, const nlohmann::json& state) {
+    if (current_task_is_schedule() && id == get_current_task_id())
+        return schedule_write_memory(id, state);
+    return session_write_memory(id, state);
+}
+
+void append_turn_event(const std::string& id, const nlohmann::json& event) {
+    if (current_task_is_schedule() && id == get_current_task_id())
+        schedule_append_event(id, event);
+    else
+        session_append_event(id, event);
+}
+
 std::string json_str(const nlohmann::json& j, const char* key)
 {
     if (!j.is_object() || !j.contains(key) || !j[key].is_string())
@@ -1518,7 +1531,7 @@ nlohmann::json session_persist_artifacts_from_result(const std::string& session_
     const int item_count = patch["items"].is_object() ? static_cast<int>(patch["items"].size()) : 0;
     const int artifact_count = patch["artifacts"].is_object() ? static_cast<int>(patch["artifacts"].size()) : 0;
     const int instruction_count = patch["instructions"].is_object() ? static_cast<int>(patch["instructions"].size()) : 0;
-    const bool applied = task_store_write_memory(session_id, patch);
+    const bool applied = write_turn_memory(session_id, patch);
     return {
         {"session_id", session_id},
         {"applied", applied},
@@ -1691,7 +1704,7 @@ nlohmann::json session_persist_tool_checkpoints_from_result(
         {"items", std::move(items_patch)},
         {"artifacts", std::move(artifacts_patch)},
     };
-    const bool applied = task_store_write_memory(session_id, patch);
+    const bool applied = write_turn_memory(session_id, patch);
     return {
         {"session_id", session_id},
         {"applied", applied},
@@ -1786,7 +1799,7 @@ nlohmann::json session_persist_security_review(const std::string& session_id,
 
     nlohmann::json patch;
     patch["items"][id] = std::move(item);
-    const bool applied = task_store_write_memory(session_id, patch);
+    const bool applied = write_turn_memory(session_id, patch);
     return {
         {"session_id", session_id},
         {"applied", applied},
@@ -1883,7 +1896,7 @@ nlohmann::json session_persist_security_decision(const std::string& session_id,
 
     nlohmann::json patch;
     patch["items"][id] = std::move(item);
-    const bool applied = task_store_write_memory(session_id, patch);
+    const bool applied = write_turn_memory(session_id, patch);
     return {
         {"session_id", session_id},
         {"applied", applied},
@@ -2150,7 +2163,7 @@ nlohmann::json session_persist_error_reflexion(
     patch["items"][id]    = item;
     patch["artifacts"]    = nlohmann::json::object();
     patch["instructions"] = nlohmann::json::object();
-    const bool applied = task_store_write_memory(session_id, patch);
+    const bool applied = write_turn_memory(session_id, patch);
 
     nlohmann::json update;
     update["session_id"]               = session_id;
@@ -2274,7 +2287,7 @@ nlohmann::json session_recover_from_journal(const std::string& session_id,
         patch["artifacts"] = artifacts_patch;
     patch["journal_recovery"] = std::move(recovery_meta);
 
-    const bool applied = task_store_write_memory(session_id, patch);
+    const bool applied = write_turn_memory(session_id, patch);
 
     nlohmann::json recovery_event = {
         {"kind", "journal_recovery"},
@@ -2284,7 +2297,7 @@ nlohmann::json session_recover_from_journal(const std::string& session_id,
         {"incomplete_turn", journal_has_incomplete_turn(journal)},
     };
     if (promoted > 0)
-        task_store_append_event(session_id, recovery_event);
+        append_turn_event(session_id, recovery_event);
 
     if (promoted > 0) {
         logger::info(std::string("[memory] journal recovery session=") + session_id

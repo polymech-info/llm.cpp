@@ -7,6 +7,67 @@
 
 namespace media::llm::path::detail {
 
+namespace {
+
+std::string apply_schedule_policy(const nlohmann::json& args, media::llm::agent::ScheduledTask& task) {
+    if (args.contains("execution") && !args["execution"].is_string())
+        return "execution must be a string";
+    if (args.contains("precision") && !args["precision"].is_string())
+        return "precision must be a string";
+    if (args.contains("sound") && !args["sound"].is_boolean())
+        return "sound must be a boolean";
+    const std::string execution = args.value("execution", std::string{"agent"});
+    const std::string precision = args.value("precision", std::string{"best_effort"});
+    if (execution != "agent" && execution != "notification")
+        return "execution must be agent or notification";
+    if (precision != "best_effort" && precision != "time_sensitive")
+        return "precision must be best_effort or time_sensitive";
+    if (precision == "time_sensitive" && execution != "notification")
+        return "precision time_sensitive is only valid for a notification";
+    task.execution = execution == "notification"
+                         ? media::llm::agent::ExecutionKind::Notification
+                         : media::llm::agent::ExecutionKind::Agent;
+    task.precision = precision == "time_sensitive"
+                         ? media::llm::agent::SchedulePrecision::TimeSensitive
+                         : media::llm::agent::SchedulePrecision::BestEffort;
+    task.sound = args.value("sound", false);
+    if (task.execution == media::llm::agent::ExecutionKind::Notification)
+        task.delivery = media::llm::agent::DeliveryKind::Notification;
+    else {
+        task.delivery = media::llm::agent::DeliveryKind::Inbox;
+        task.sound = false;
+    }
+    return {};
+}
+
+nlohmann::json schedule_extra_properties() {
+    return {
+        {"execution",
+         {{"type", "string"},
+          {"enum", nlohmann::json::array({"agent", "notification"})},
+          {"description",
+           "agent runs the prompt as a model turn. notification shows title and prompt "
+           "as a reminder and does not call the model. Default agent."}}},
+        {"precision",
+         {{"type", "string"},
+          {"enum", nlohmann::json::array({"best_effort", "time_sensitive"})},
+          {"description",
+           "time_sensitive is only valid for notification. The phone uses an exact alarm "
+           "when that permission is granted. Default best_effort."}}},
+        {"sound",
+         {{"type", "boolean"},
+          {"description", "Play a sound for a notification reminder. Default false."}}},
+    };
+}
+
+void add_schedule_extras(nlohmann::json& properties) {
+    const auto extras = schedule_extra_properties();
+    for (auto it = extras.begin(); it != extras.end(); ++it)
+        properties[it.key()] = it.value();
+}
+
+} // namespace
+
 ExecuteResult do_schedule_at(const nlohmann::json& args) {
     if (!args.contains("title") || !args["title"].is_string())
         return simple_error("schedule_at: 'title' (string) is required");
@@ -28,8 +89,12 @@ ExecuteResult do_schedule_at(const nlohmann::json& args) {
         task.memory_state = args["initial_state"];
     if (args.contains("folder_hint") && args["folder_hint"].is_string())
         task.folder_hint  = args["folder_hint"].get<std::string>();
+    if (const std::string policy = apply_schedule_policy(args, task); !policy.empty())
+        return simple_error(std::string("schedule_at: ") + policy);
 
     const std::string id = media::llm::agent::task_store_create(std::move(task));
+    if (id.empty())
+        return simple_error("could not save the scheduled task");
     return simple_ok(nlohmann::json{{"task_id", id}});
 }
 
@@ -53,8 +118,12 @@ ExecuteResult do_schedule_in(const nlohmann::json& args) {
         task.memory_state = args["initial_state"];
     if (args.contains("folder_hint") && args["folder_hint"].is_string())
         task.folder_hint  = args["folder_hint"].get<std::string>();
+    if (const std::string policy = apply_schedule_policy(args, task); !policy.empty())
+        return simple_error(std::string("schedule_in: ") + policy);
 
     const std::string id = media::llm::agent::task_store_create(std::move(task));
+    if (id.empty())
+        return simple_error("could not save the scheduled task");
     return simple_ok(nlohmann::json{{"task_id", id}});
 }
 
@@ -85,8 +154,12 @@ ExecuteResult do_schedule_every(const nlohmann::json& args) {
         task.memory_state      = args["initial_state"];
     if (args.contains("folder_hint") && args["folder_hint"].is_string())
         task.folder_hint       = args["folder_hint"].get<std::string>();
+    if (const std::string policy = apply_schedule_policy(args, task); !policy.empty())
+        return simple_error(std::string("schedule_every: ") + policy);
 
     const std::string id = media::llm::agent::task_store_create(std::move(task));
+    if (id.empty())
+        return simple_error("could not save the scheduled task");
     return simple_ok(nlohmann::json{{"task_id", id}});
 }
 
@@ -113,64 +186,76 @@ ExecuteResult do_schedule_list(const nlohmann::json& /*args*/) {
 // ── Catalog schemas ───────────────────────────────────────────────────────
 
 ToolDef make_schedule_at() {
+    nlohmann::json properties = {
+        {"title",         {{"type", "string"}, {"description", "Short human-readable name for the task."}}},
+        {"prompt",        {{"type", "string"}, {"description", "The full prompt to run at fire time. For a notification this is the reminder text."}}},
+        {"run_at",        {{"type", "string"}, {"description", "ISO 8601 UTC datetime, e.g. \"2026-05-10T18:30:00Z\"."}}},
+        {"initial_state", {{"type", "object"}, {"description", "Optional initial memory_state JSON."}}},
+        {"folder_hint",   {{"type", "string"}, {"description", "Optional folder context for the scheduled turn."}}},
+    };
+    add_schedule_extras(properties);
     return ToolDef{
         "schedule_at",
-        "Schedule a one-shot agent task to run at an exact UTC time. "
+        "Schedule a one-shot task at an exact UTC time. "
         "Use when the user says 'at 18:00', 'tomorrow morning', or gives an explicit time. "
-        "Saved on disk and reloaded after a restart. Runs while the app is open; "
-        "if it comes due while the app is closed, it runs once the next time the app starts.",
-        nlohmann::json{
+        "execution=agent (default) runs the prompt. execution=notification shows the title and "
+        "prompt as a reminder and does not call the model. precision=time_sensitive is only "
+        "valid for notification; Android uses an exact alarm when that permission is granted. "
+        "Saved on disk. An agent task runs while the app is open, and once on the next start "
+        "if it came due while the app was closed.",
+        {
             {"type", "object"},
-            {"properties", {
-                {"title",         {{"type", "string"}, {"description", "Short human-readable name for the task."}}},
-                {"prompt",        {{"type", "string"}, {"description", "The full prompt to run at fire time."}}},
-                {"run_at",        {{"type", "string"}, {"description", "ISO 8601 UTC datetime, e.g. \"2026-05-10T18:30:00Z\"."}}},
-                {"initial_state", {{"type", "object"}, {"description", "Optional initial memory_state JSON."}}},
-                {"folder_hint",   {{"type", "string"}, {"description", "Optional folder context for the scheduled turn."}}},
-            }},
+            {"properties", std::move(properties)},
             {"required", nlohmann::json::array({"title", "prompt", "run_at"})},
         }};
 }
 
 ToolDef make_schedule_in() {
+    nlohmann::json properties = {
+        {"title",          {{"type", "string"}}},
+        {"prompt",         {{"type", "string"}, {"description", "Prompt for an agent turn, or the reminder text for a notification."}}},
+        {"delay_seconds",  {{"type", "integer"}, {"minimum", 1}, {"description", "Seconds from now until the task fires."}}},
+        {"initial_state",  {{"type", "object"}}},
+        {"folder_hint",    {{"type", "string"}}},
+    };
+    add_schedule_extras(properties);
     return ToolDef{
         "schedule_in",
-        "Schedule a one-shot agent task to run after a delay. "
-        "Use when the user says 'in 30 seconds', 'after 5 minutes', etc. "
-        "Saved on disk and reloaded after a restart. Runs while the app is open; "
-        "if it comes due while the app is closed, it runs once the next time the app starts.",
-        nlohmann::json{
+        "Schedule a one-shot task to run after a delay. "
+        "Use when the user says 'in 30 seconds', 'after 5 minutes', or 'remind me'. "
+        "execution=agent (default) runs the prompt. execution=notification is the reminder "
+        "and does not call the model. precision=time_sensitive is only valid for notification. "
+        "Saved on disk. An agent task runs while the app is open, and once on the next start "
+        "if it came due while the app was closed.",
+        {
             {"type", "object"},
-            {"properties", {
-                {"title",          {{"type", "string"}}},
-                {"prompt",         {{"type", "string"}}},
-                {"delay_seconds",  {{"type", "integer"}, {"minimum", 1}, {"description", "Seconds from now until the task fires."}}},
-                {"initial_state",  {{"type", "object"}}},
-                {"folder_hint",    {{"type", "string"}}},
-            }},
+            {"properties", std::move(properties)},
             {"required", nlohmann::json::array({"title", "prompt", "delay_seconds"})},
         }};
 }
 
 ToolDef make_schedule_every() {
+    nlohmann::json properties = {
+        {"title",            {{"type", "string"}}},
+        {"prompt",           {{"type", "string"}}},
+        {"interval_seconds", {{"type", "integer"}, {"minimum", 5}, {"description", "Seconds between ticks. A few seconds only fire while the app is running."}}},
+        {"start_at",         {{"type", "string"}, {"description", "Optional ISO 8601 UTC start time. Defaults to now + interval."}}},
+        {"max_runs",         {{"type", "integer"}, {"minimum", 1}, {"description", "Optional cap on total runs; omit for unlimited."}}},
+        {"initial_state",    {{"type", "object"}}},
+        {"folder_hint",      {{"type", "string"}}},
+    };
+    add_schedule_extras(properties);
     return ToolDef{
         "schedule_every",
-        "Schedule a recurring agent task on a fixed interval. "
+        "Schedule a recurring task on a fixed interval. "
         "Use when the user says 'every 30 seconds', 'once per hour', 'monitor', or 'keep watching'. "
-        "Saved on disk and reloaded after a restart. Runs while the app is open. "
-        "A tick that comes due while the app is closed runs once on the next start; "
+        "execution=agent (default) runs the prompt each tick. execution=notification repeats the "
+        "reminder and does not call the model. precision=time_sensitive is only valid for notification. "
+        "Saved on disk. A tick that comes due while the app is closed runs once on the next start; "
         "missed intervals are not replayed. Intervals of a few seconds only fire while the app is running.",
-        nlohmann::json{
+        {
             {"type", "object"},
-            {"properties", {
-                {"title",            {{"type", "string"}}},
-                {"prompt",           {{"type", "string"}}},
-                {"interval_seconds", {{"type", "integer"}, {"minimum", 5}, {"description", "Seconds between ticks."}}},
-                {"start_at",         {{"type", "string"}, {"description", "Optional ISO 8601 UTC start time. Defaults to now + interval."}}},
-                {"max_runs",         {{"type", "integer"}, {"minimum", 1}, {"description", "Optional cap on total runs; omit for unlimited."}}},
-                {"initial_state",    {{"type", "object"}}},
-                {"folder_hint",      {{"type", "string"}}},
-            }},
+            {"properties", std::move(properties)},
             {"required", nlohmann::json::array({"title", "prompt", "interval_seconds"})},
         }};
 }
@@ -191,7 +276,7 @@ ToolDef make_schedule_cancel() {
 ToolDef make_schedule_list() {
     return ToolDef{
         "schedule_list",
-        "List saved scheduled tasks (id, title, schedule, enabled, next_run_at, run_count).",
+        "List saved scheduled tasks (id, title, schedule, execution, enabled, next_run_at, run_count).",
         nlohmann::json{
             {"type", "object"},
             {"properties", nlohmann::json::object()},

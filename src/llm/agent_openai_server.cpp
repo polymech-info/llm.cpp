@@ -20,6 +20,7 @@
 #include "win/settings_store.hpp"
 #endif
 #include "llm/agent.hpp"
+#include "llm/agent_event_surface.hpp"
 #include "llm/agent_workflow.hpp"
 #include "llm/agent_launch.hpp"
 #include "llm/agent_tool_provider.hpp"
@@ -1405,30 +1406,49 @@ PmChatRtCallbacks rt_callbacks(RtLive* live)
         if (live)
             rt_emit_for(live->epoch, audio_method_name(AudioMethod::NetworkError), nlohmann::json::array({rt_text(text)}));
     };
-    // Spoken run_pm_agent tools never ride the chat-completion SSE. Without
-    // this the side panel only hears the voice summary.
-    cb.on_agent_event = [](const char* kind, const char* /*text*/, const char* tool_name, void* ud) {
+    // Spoken run_pm_agent tools never ride the chat-completion SSE. The phone
+    // transcript needs the same tool calls and result paths a typed turn draws.
+    cb.on_event_json = [](const char* event_json, void* ud) {
         auto* live = static_cast<RtLive*>(ud);
-        if (!live)
+        if (!live || !event_json || !event_json[0])
             return;
-        const std::string k = rt_text(kind);
-        if (k != "tool_call" && k != "tool_result")
+        const auto parsed = media::json::try_parse(event_json);
+        if (!parsed.is_object())
             return;
-        std::string name = rt_text(tool_name);
+        const std::string kind = parsed.value("kind", std::string{});
+        if (kind != "tool_call" && kind != "tool_result"
+            && kind != "tool_file_progress" && kind != "thinking")
+            return;
+        std::string name = parsed.value("tool_name", std::string{});
+        if (kind == "thinking")
+            name = parsed.value("text", std::string{});
         if (name.empty())
             name = "tool";
         std::string id;
-        const bool starting = k == "tool_call";
-        if (starting)
+        if (kind == "tool_call")
             id = std::to_string(live->tool_n.fetch_add(1) + 1);
-        else {
+        else if (kind == "tool_result") {
             const int n = live->tool_n.load();
             id = std::to_string(n > 0 ? n : 1);
+        } else {
+            id = std::to_string(live->tool_n.load()) + "-" + kind;
         }
-        nlohmann::json row{{"role", "tool"}, {"text", std::move(name)}, {"toolCallId", "rt-" + id}};
-        if (starting)
+        nlohmann::json row{
+            {"role", "tool"},
+            {"kind", kind},
+            {"text", std::move(name)},
+            {"toolCallId", "rt-" + id},
+        };
+        if (kind == "tool_call")
             row["toolRunning"] = true;
-        rt_emit_for(live->epoch, audio_method_name(AudioMethod::AppendText), nlohmann::json::array({std::move(row)}));
+        if (parsed.contains("payload")) {
+            row["payload"] = media::llm::agent::surface_value(parsed["payload"], 0);
+            const auto paths = media::llm::agent::surface_output_paths(parsed["payload"]);
+            if (!paths.empty())
+                row["paths"] = paths;
+        }
+        rt_emit_for(live->epoch, audio_method_name(AudioMethod::AppendText),
+                    nlohmann::json::array({std::move(row)}));
     };
     cb.on_closed = [](void* ud) {
         auto* live = static_cast<RtLive*>(ud);
