@@ -1,17 +1,39 @@
 #include "agent_scheduler.hpp"
+#include "agent_event_surface.hpp"
+#include "llm/path_tool_executor.hpp"
 
 #include "logging/logger.h"
+#include "net/http_client.hpp"
+#include "net/uri.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <sstream>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace media::llm::agent {
 
 namespace {
 constexpr size_t k_recent_events_cap = 10;
+
+void note_tick_tool_result(nlohmann::json& files,
+                           std::unordered_set<std::string>& seen,
+                           const Event& event) {
+    if (event.kind != Event::ToolResult)
+        return;
+    for (const auto& path : surface_output_paths(event.payload)) {
+        if (!path.is_string())
+            continue;
+        const std::string value = path.get<std::string>();
+        if (value.empty() || !seen.insert(value).second)
+            continue;
+        files.push_back({{"path", value}, {"tool", event.tool_name}});
+    }
+}
 }
 
 AgentScheduler::AgentScheduler()  = default;
@@ -142,7 +164,12 @@ AgentTickResult AgentScheduler::run_agent_tick(const ScheduledTask& task) {
     turn.folder_hint = task.folder_hint;
     turn.cancel_check = [this] { return stop_requested_.load(); };
 
-    Result result = run_turn(turn, prov, ev_cb);
+    nlohmann::json files = nlohmann::json::array();
+    std::unordered_set<std::string> seen_files;
+    Result result = run_turn(turn, prov, [&](const Event& event) {
+        note_tick_tool_result(files, seen_files, event);
+        return !ev_cb || ev_cb(event);
+    });
     {
         std::ostringstream s;
         s << "[scheduler] tick done  task=" << task_id
@@ -158,7 +185,12 @@ AgentTickResult AgentScheduler::run_agent_tick(const ScheduledTask& task) {
     out.ok = result.ok;
     out.text = result.final_text;
     out.error = result.error;
+    out.files = std::move(files);
     return out;
+}
+
+AgentTickResult AgentScheduler::run_tick(const ScheduledTask& task) {
+    return run_agent_tick(task);
 }
 
 namespace {
@@ -219,17 +251,118 @@ nlohmann::json schedule_next_wakeup() {
     return wakeup_for(std::chrono::system_clock::now());
 }
 
+namespace {
+
+AgentTickResult run_frozen_http(const ScheduledTask& task) {
+    AgentTickResult tick;
+    tick.ran = true;
+    const auto& args = task.tool_args.is_object() ? task.tool_args : nlohmann::json::object();
+    const std::string url = args.value("url", std::string{});
+    std::string method = args.value("method", std::string{"GET"});
+    for (char& c : method)
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    if (url.rfind("https://", 0) != 0) {
+        tick.error = "https url is required";
+        return tick;
+    }
+    if (method != "GET" && method != "POST" && method != "PUT" && method != "PATCH") {
+        tick.error = "method is not allowed";
+        return tick;
+    }
+    const std::string body = args.value("body", std::string{});
+    if (body.size() > 65536) {
+        tick.error = "body is too large";
+        return tick;
+    }
+    pm::uri::ParseOptions uri_options;
+    uri_options.reject_userinfo = true;
+    uri_options.require_authority_host = true;
+    const auto parsed = pm::uri::parse_http_uri(url, uri_options);
+    std::string host_reason;
+    if (!parsed || !parsed->valid || pm::uri::host_is_private_or_invalid(*parsed, host_reason)) {
+        tick.error = host_reason.empty() ? "refusing private or invalid host" : "refusing " + host_reason;
+        return tick;
+    }
+    media::net::HttpRequest req;
+    req.url = url;
+    req.method = method;
+    req.body = body;
+    req.retries = 0;
+    req.follow_redirects = false;
+    req.timeout_ms = 20000;
+    req.connect_timeout_ms = 4000;
+    if (args.contains("content_type") && args["content_type"].is_string())
+        req.content_type = args["content_type"].get<std::string>();
+    if (!task.idempotency_key.empty())
+        req.headers.push_back("Idempotency-Key: " + task.idempotency_key);
+    const media::net::HttpResponse response = media::net::http_fetch(req);
+    if (response.status_code == 0) {
+        tick.error = response.error.empty() ? "unknown outcome" : response.error;
+        return tick;
+    }
+    tick.ok = response.ok && response.status_code < 400;
+    tick.text = std::to_string(response.status_code);
+    if (!tick.ok)
+        tick.error = response.error.empty() ? tick.text : response.error;
+    if (tick.text.size() > 500)
+        tick.text.resize(500);
+    return tick;
+}
+
+AgentTickResult run_frozen_tool(const ScheduledTask& task) {
+    AgentTickResult tick;
+    tick.ran = true;
+    if (task.tool_name == "http_request")
+        return run_frozen_http(task);
+    if (!scheduled_tool_allowed(task.tool_name)) {
+        tick.error = "tool is not allowlisted";
+        return tick;
+    }
+    const auto result = media::llm::path::execute(
+        task.tool_name, task.tool_args.is_object() ? task.tool_args : nlohmann::json::object());
+    tick.ok = result.ok;
+    if (!result.ok) {
+        tick.error = result.error.empty() ? "tool failed" : result.error;
+        return tick;
+    }
+    tick.text = task.tool_name;
+    if (result.envelope.is_object()) {
+        for (const auto& path : surface_output_paths(result.envelope)) {
+            if (!path.is_string())
+                continue;
+            const std::string value = path.get<std::string>();
+            if (value.empty())
+                continue;
+            tick.files.push_back({{"path", value}, {"tool", task.tool_name}});
+        }
+    }
+    return tick;
+}
+
+} // namespace
+
 nlohmann::json run_due(std::chrono::system_clock::time_point now,
                        bool run_agents,
                        std::function<AgentTickResult(const ScheduledTask&)> run_agent,
                        std::function<bool()> should_stop,
-                       std::function<std::chrono::system_clock::time_point()> now_source) {
+                       std::function<std::chrono::system_clock::time_point()> now_source,
+                       std::function<AgentTickResult(const ScheduledTask&)> run_tool) {
     int agent_runs = 0;
     int notification_runs = 0;
+    int tool_runs = 0;
     int interrupted = 0;
     int blocked = 0;
     nlohmann::json posted = nlohmann::json::array();
-    const auto tasks = task_store_list();
+    auto tasks = task_store_list();
+    std::stable_sort(tasks.begin(), tasks.end(), [](const ScheduledTask& a, const ScheduledTask& b) {
+        auto rank = [](ExecutionKind kind) {
+            if (kind == ExecutionKind::Notification) return 0;
+            if (kind == ExecutionKind::Tool) return 1;
+            return 2;
+        };
+        return rank(a.execution) < rank(b.execution);
+    });
+    nlohmann::json results = nlohmann::json::array();
     for (const auto& listed : tasks) {
         if (should_stop && should_stop())
             break;
@@ -284,8 +417,58 @@ nlohmann::json run_due(std::chrono::system_clock::time_point now,
                 break;
             }
             if (task_store_finish_due(began.task.id, began.generation, finished_at(now, now_source),
-                                      tick.ok, tick.text, tick.error, false))
+                                      tick.ok, tick.text, tick.error, false, tick.files)) {
                 ++agent_runs;
+                std::string text = tick.ok ? tick.text : tick.error;
+                if (text.size() > 180) text.resize(180);
+                results.push_back({
+                    {"task_id", began.task.id},
+                    {"occurrence_id", began.task.occurrence_id},
+                    {"title", began.task.title},
+                    {"text", std::move(text)},
+                    {"ok", tick.ok},
+                    {"execution", "agent"},
+                });
+            }
+            break;
+        }
+        case ExecutionKind::Tool: {
+            AgentTickResult tick;
+            if (!scheduled_tool_allowed(began.task.tool_name)) {
+                tick.ran = true;
+                tick.ok = false;
+                tick.error = "tool is not allowlisted";
+            } else {
+                try {
+                    tick = run_tool ? run_tool(began.task) : run_frozen_tool(began.task);
+                } catch (const std::exception& ex) {
+                    tick.ran = true;
+                    tick.ok = false;
+                    tick.error = ex.what();
+                } catch (...) {
+                    tick.ran = true;
+                    tick.ok = false;
+                    tick.error = "run_due tool threw";
+                }
+            }
+            if (!tick.ran) {
+                task_store_release_unrun(began.task.id, began.generation);
+                break;
+            }
+            if (task_store_finish_due(began.task.id, began.generation, finished_at(now, now_source),
+                                      tick.ok, tick.text, tick.error, false, tick.files)) {
+                ++tool_runs;
+                std::string text = tick.ok ? tick.text : tick.error;
+                if (text.size() > 180) text.resize(180);
+                results.push_back({
+                    {"task_id", began.task.id},
+                    {"occurrence_id", began.task.occurrence_id},
+                    {"title", began.task.title},
+                    {"text", std::move(text)},
+                    {"ok", tick.ok},
+                    {"execution", "tool"},
+                });
+            }
             break;
         }
         default: {
@@ -299,9 +482,11 @@ nlohmann::json run_due(std::chrono::system_clock::time_point now,
     return {
         {"agent_runs", agent_runs},
         {"notification_runs", notification_runs},
+        {"tool_runs", tool_runs},
         {"interrupted", interrupted},
         {"blocked", blocked},
         {"posted", std::move(posted)},
+        {"results", std::move(results)},
         {"wakeup", wakeup_for(now)},
     };
 }
@@ -321,9 +506,10 @@ AgentTickResult ok_tick(int& calls) {
 
 nlohmann::json due_at(bool run_agents,
                       std::function<AgentTickResult(const ScheduledTask&)> run_agent,
-                      std::function<bool()> should_stop = {}) {
+                      std::function<bool()> should_stop = {},
+                      std::function<AgentTickResult(const ScheduledTask&)> run_tool = {}) {
     return run_due(k_selftest_now, run_agents, std::move(run_agent), std::move(should_stop),
-                   [] { return k_selftest_now; });
+                   [] { return k_selftest_now; }, std::move(run_tool));
 }
 
 ScheduledTask make_due(const char* title, ScheduleKind kind) {
@@ -386,9 +572,64 @@ nlohmann::json scheduler_run_due_selftest() {
             const auto loaded = task_store_get(id);
             const int calls_after = calls;
             due_at(true, agent);
+            const auto& ev = loaded && !loaded->events.empty() ? loaded->events.back() : nlohmann::json();
+            const auto run_id = ev.value("run_id", std::string{});
             if (first.value("agent_runs", 0) != 1 || calls_after != 1 || calls != 1 || !loaded
                 || loaded->enabled || loaded->occurrence_status != OccurrenceStatus::Completed)
                 out["error"] = "one-shot agent did not run once and disable";
+            else if (!ev.is_object() || ev.value("type", std::string{}) != "tick_result"
+                     || run_id.empty() || run_id != loaded->occurrence_id)
+                out["error"] = "tick result has no run_id";
+        }
+
+        if (!out.contains("error")) {
+            nlohmann::json noted = nlohmann::json::array();
+            std::unordered_set<std::string> seen;
+            Event registered;
+            registered.kind = Event::ToolResult;
+            registered.tool_name = "image_from_camera";
+            registered.text = "C:/not-a-card.jpg";
+            registered.payload = {
+                {"ok", true},
+                {"output_path", "/storage/roll.jpg"},
+                {"final_text", "C:/not-a-card.jpg"},
+            };
+            note_tick_tool_result(noted, seen, registered);
+            Event failed;
+            failed.kind = Event::ToolResult;
+            failed.tool_name = "image_from_camera";
+            failed.payload = {{"ok", false}, {"output_path", "/storage/skipped.jpg"}};
+            note_tick_tool_result(noted, seen, failed);
+            if (noted.size() != 1 || noted[0].value("path", std::string{}) != "/storage/roll.jpg"
+                || noted[0].value("tool", std::string{}) != "image_from_camera")
+                out["error"] = "tool file was not registered";
+        }
+
+        if (!out.contains("error")) {
+            const auto with_file = [&](const ScheduledTask&) {
+                auto tick = ok_tick(calls);
+                tick.text = "saved C:/not-a-card.jpg";
+                tick.files = nlohmann::json::array({
+                    {{"path", "/storage/roll.jpg"}, {"tool", "image_from_camera"}},
+                });
+                return tick;
+            };
+            calls = 0;
+            const std::string id = task_store_create(make_due("due-file", ScheduleKind::In));
+            ids.push_back(id);
+            due_at(true, with_file);
+            const auto loaded = task_store_get(id);
+            const auto& ev = loaded && !loaded->events.empty() ? loaded->events.back() : nlohmann::json();
+            const auto stored = ev.is_object()
+                ? ev.value("files", nlohmann::json::array())
+                : nlohmann::json::array();
+            const bool mentioned = ev.is_object()
+                && ev.value("final_text", std::string{}).find("not-a-card") != std::string::npos;
+            const bool scraped = stored.dump().find("not-a-card") != std::string::npos;
+            if (!loaded || !ev.is_object() || stored.size() != 1
+                || stored[0].value("path", std::string{}) != "/storage/roll.jpg"
+                || !mentioned || scraped)
+                out["error"] = "tick file card scraped the reply";
         }
 
         if (!out.contains("error")) {
@@ -664,7 +905,7 @@ nlohmann::json scheduler_run_due_selftest() {
         if (!out.contains("error")
             && (std::strcmp(schedule_wakeup_kind(alarm_task), "alarm") != 0
                 || std::strcmp(schedule_wakeup_kind(work_task), "work") != 0
-                || std::strcmp(schedule_wakeup_kind(agent_task), "none") != 0))
+                || std::strcmp(schedule_wakeup_kind(agent_task), "work") != 0))
             out["error"] = "wakeup kind mismatched the executor";
         if (!out.contains("error")) {
             ScheduledTask blocked = alarm_task;
@@ -684,11 +925,95 @@ nlohmann::json scheduler_run_due_selftest() {
             const auto alarm = wake.value("alarm", nlohmann::json{});
             const auto work_id = work.value("task_id", std::string{});
             const auto alarm_id = alarm.value("task_id", std::string{});
-            if (!work.is_object() || work_id != work_task.id
+            if (!work.is_object() || work_id != agent_task.id
                 || !alarm.is_object() || alarm_id != alarm_task.id
-                || work_id == agent_task.id || alarm_id == agent_task.id
+                || alarm_id == agent_task.id
                 || work_id == blocked.id || alarm_id == blocked.id)
                 out["error"] = "work and alarm wakeups were not independent";
+        }
+
+        if (!out.contains("error")) {
+            int calls = 0;
+            ScheduledTask tool = make_due("due-tool", ScheduleKind::In);
+            tool.execution = ExecutionKind::Tool;
+            tool.tool_name = "write_file";
+            tool.tool_args = {{"path", "hello.txt"}, {"content", "hello"}};
+            if (std::strcmp(schedule_wakeup_kind(tool), "work") != 0)
+                out["error"] = "tool task did not arm a worker";
+            const std::string id = task_store_create(std::move(tool));
+            ids.push_back(id);
+            auto runner = [&](const ScheduledTask& task) {
+                ++calls;
+                AgentTickResult result;
+                result.ran = true;
+                result.ok = task.tool_name == "write_file"
+                    && task.tool_args.value("content", std::string{}) == "hello";
+                result.text = "write_file";
+                if (!result.ok)
+                    result.error = "frozen arguments changed";
+                return result;
+            };
+            due_at(false, {}, {}, runner);
+            auto loaded = task_store_get(id);
+            if (calls != 0 || !loaded || !loaded->enabled || !loaded->idempotency_key.empty())
+                out["error"] = "background run_due claimed a tool";
+            else {
+                due_at(true, {}, {}, runner);
+                loaded = task_store_get(id);
+                const auto key = loaded ? loaded->idempotency_key : std::string{};
+                due_at(true, {}, {}, runner);
+                loaded = task_store_get(id);
+                if (calls != 1 || !loaded || loaded->enabled || key.empty()
+                    || loaded->idempotency_key != key
+                    || loaded->occurrence_status != OccurrenceStatus::Completed
+                    || loaded->tool_args.value("content", std::string{}) != "hello")
+                    out["error"] = "frozen tool ran more than once";
+            }
+        }
+
+        if (!out.contains("error")) {
+            int calls = 0;
+            ScheduledTask stale = make_due("due-tool-stale", ScheduleKind::In);
+            stale.execution = ExecutionKind::Tool;
+            stale.tool_name = "write_file";
+            stale.occurrence_status = OccurrenceStatus::Running;
+            stale.occurrence_planned_at = stale.next_run_at;
+            stale.occurrence_id = "tool-stale";
+            stale.idempotency_key = "tool-stale";
+            const std::string id = task_store_create(std::move(stale));
+            ids.push_back(id);
+            due_at(true, {}, {}, [&](const ScheduledTask&) {
+                ++calls;
+                AgentTickResult result;
+                result.ran = true;
+                result.ok = true;
+                return result;
+            });
+            const auto loaded = task_store_get(id);
+            if (calls != 0 || !loaded || loaded->enabled
+                || loaded->occurrence_status != OccurrenceStatus::Interrupted
+                || loaded->idempotency_key != "tool-stale")
+                out["error"] = "interrupted tool ran again";
+        }
+
+        if (!out.contains("error")) {
+            int calls = 0;
+            ScheduledTask bad = make_due("due-tool-deny", ScheduleKind::In);
+            bad.execution = ExecutionKind::Tool;
+            bad.tool_name = "file_delete";
+            const std::string id = task_store_create(std::move(bad));
+            ids.push_back(id);
+            due_at(true, {}, {}, [&](const ScheduledTask&) {
+                ++calls;
+                AgentTickResult result;
+                result.ran = true;
+                result.ok = true;
+                return result;
+            });
+            const auto loaded = task_store_get(id);
+            if (calls != 0 || !loaded || loaded->enabled
+                || loaded->last_error != "tool is not allowlisted")
+                out["error"] = "disallowed tool was called";
         }
 
         erase_all();

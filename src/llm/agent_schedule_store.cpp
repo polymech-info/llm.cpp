@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <ctime>
 #include <cstring>
 #include <fstream>
 #include <mutex>
@@ -57,7 +58,16 @@ std::string gen_id(const std::string& title) {
 } // namespace
 
 const char* execution_kind_id(ExecutionKind kind) {
-    return kind == ExecutionKind::Notification ? "notification" : "agent";
+    switch (kind) {
+        case ExecutionKind::Notification: return "notification";
+        case ExecutionKind::Tool:         return "tool";
+        case ExecutionKind::Agent:        break;
+    }
+    return "agent";
+}
+
+bool scheduled_tool_allowed(const std::string& name) {
+    return name == "write_file" || name == "http_request";
 }
 
 const char* precision_id(SchedulePrecision precision) {
@@ -84,10 +94,11 @@ const char* schedule_wakeup_kind(const ScheduledTask& task) {
         return "none";
     if (task.occurrence_status == OccurrenceStatus::Blocked)
         return "none";
-    // Agent turns stay on the in-process loop. An OS wakeup for one would
-    // fire, skip the model, and immediately ask to be armed again.
+    // Agent and tool tasks wake through the deferrable worker. The alarm
+    // stays a reminder. The worker runs the claim; the chat poll does not
+    // have to be the process that is alive.
     if (task.execution != ExecutionKind::Notification)
-        return "none";
+        return "work";
     if (task.precision == SchedulePrecision::TimeSensitive)
         return "alarm";
     return "work";
@@ -106,6 +117,7 @@ const char* delivery_kind_id(DeliveryKind kind) {
 
 ExecutionKind execution_kind_from(const std::string& text) {
     if (text == "notification") return ExecutionKind::Notification;
+    if (text == "tool") return ExecutionKind::Tool;
     return ExecutionKind::Agent;
 }
 
@@ -141,6 +153,46 @@ void push_event_locked(ScheduledTask& task, nlohmann::json event) {
     }
 }
 
+ScheduleDailyClock g_daily_clock = nullptr;
+
+std::optional<std::chrono::system_clock::time_point> next_daily_utc(
+    std::chrono::system_clock::time_point after, int hour, int minute) {
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59)
+        return std::nullopt;
+    const auto after_s = std::chrono::system_clock::to_time_t(after);
+    std::tm tm{};
+#if defined(_WIN32)
+    if (gmtime_s(&tm, &after_s) != 0)
+        return std::nullopt;
+#else
+    if (!gmtime_r(&after_s, &tm))
+        return std::nullopt;
+#endif
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_sec = 0;
+#if defined(_WIN32)
+    const auto candidate = _mkgmtime(&tm);
+#else
+    const auto candidate = timegm(&tm);
+#endif
+    if (candidate == static_cast<std::time_t>(-1))
+        return std::nullopt;
+    auto when = std::chrono::system_clock::from_time_t(candidate);
+    if (when <= after)
+        when += std::chrono::hours(24);
+    return when;
+}
+
+std::optional<std::chrono::system_clock::time_point> next_daily_instant(
+    std::chrono::system_clock::time_point after, int hour, int minute, const std::string& timezone) {
+    if (g_daily_clock) {
+        if (const auto zoned = g_daily_clock(after, hour, minute, timezone))
+            return zoned;
+    }
+    return next_daily_utc(after, hour, minute);
+}
+
 void arm_after_attempt_locked(ScheduledTask& task,
                                const std::chrono::system_clock::time_point& now) {
     task.run_count++;
@@ -149,6 +201,10 @@ void arm_after_attempt_locked(ScheduledTask& task,
     if (spec.kind == ScheduleKind::Every && spec.interval) {
         task.next_run_at = now + *spec.interval;
         if (spec.max_runs && task.run_count >= *spec.max_runs)
+            task.enabled = false;
+    } else if (spec.kind == ScheduleKind::Daily) {
+        task.next_run_at = next_daily_instant(now, spec.hour, spec.minute, spec.timezone);
+        if (!task.next_run_at || (spec.max_runs && task.run_count >= *spec.max_runs))
             task.enabled = false;
     } else {
         task.enabled = false;
@@ -202,6 +258,7 @@ nlohmann::json task_to_json(const ScheduledTask& t) {
     if (t.occurrence_status != OccurrenceStatus::None || !t.occurrence_id.empty()) {
         nlohmann::json occurrence = {{"status", occurrence_status_id(t.occurrence_status)}};
         if (!t.occurrence_id.empty()) occurrence["id"] = t.occurrence_id;
+        if (!t.idempotency_key.empty()) occurrence["idempotency_key"] = t.idempotency_key;
         if (t.occurrence_planned_at)
             occurrence["planned_at"] = format_iso8601(*t.occurrence_planned_at);
         j["occurrence"] = std::move(occurrence);
@@ -213,12 +270,24 @@ nlohmann::json task_to_json(const ScheduledTask& t) {
         case ScheduleKind::At:    sched["kind"] = "at";    break;
         case ScheduleKind::In:    sched["kind"] = "in";    break;
         case ScheduleKind::Every: sched["kind"] = "every"; break;
+        case ScheduleKind::Daily: sched["kind"] = "daily"; break;
     }
     if (t.schedule.interval) sched["interval_seconds"] = static_cast<int>(t.schedule.interval->count());
     if (t.schedule.delay)    sched["delay_seconds"]    = static_cast<int>(t.schedule.delay->count());
     if (t.schedule.max_runs) sched["max_runs"]         = *t.schedule.max_runs;
     if (t.schedule.run_at)   sched["run_at"]           = format_iso8601(*t.schedule.run_at);
     if (t.schedule.start_at) sched["start_at"]         = format_iso8601(*t.schedule.start_at);
+    if (t.schedule.kind == ScheduleKind::Daily) {
+        sched["hour"] = t.schedule.hour;
+        sched["minute"] = t.schedule.minute;
+        if (!t.schedule.timezone.empty()) sched["timezone"] = t.schedule.timezone;
+    }
+    if (t.execution == ExecutionKind::Tool || !t.tool_name.empty()) {
+        j["tool"] = {
+            {"name", t.tool_name},
+            {"arguments", t.tool_args.is_object() ? t.tool_args : nlohmann::json::object()},
+        };
+    }
     j["schedule"]             = std::move(sched);
 
     if (t.next_run_at) j["next_run_at"] = format_iso8601(*t.next_run_at);
@@ -265,8 +334,14 @@ static bool task_from_json(const nlohmann::json& j, ScheduledTask& t) {
             const auto& occurrence = j["occurrence"];
             t.occurrence_status = occurrence_status_from(occurrence.value("status", std::string{}));
             t.occurrence_id = occurrence.value("id", std::string{});
+            t.idempotency_key = occurrence.value("idempotency_key", std::string{});
             if (occurrence.contains("planned_at") && occurrence["planned_at"].is_string())
                 t.occurrence_planned_at = parse_iso8601(occurrence["planned_at"].get<std::string>());
+        }
+        if (j.contains("tool") && j["tool"].is_object()) {
+            t.tool_name = j["tool"].value("name", std::string{});
+            if (j["tool"].contains("arguments") && j["tool"]["arguments"].is_object())
+                t.tool_args = j["tool"]["arguments"];
         }
         if (j.contains("memory_state") && j["memory_state"].is_object())
             t.memory_state = j["memory_state"];
@@ -314,7 +389,14 @@ static bool task_from_json(const nlohmann::json& j, ScheduledTask& t) {
             const auto kind = sched.value("kind", std::string{"every"});
             if (kind == "at") t.schedule.kind = ScheduleKind::At;
             else if (kind == "in") t.schedule.kind = ScheduleKind::In;
+            else if (kind == "daily") t.schedule.kind = ScheduleKind::Daily;
             else t.schedule.kind = ScheduleKind::Every;
+            if (sched.contains("hour") && sched["hour"].is_number())
+                t.schedule.hour = json_int_field(sched, "hour");
+            if (sched.contains("minute") && sched["minute"].is_number())
+                t.schedule.minute = json_int_field(sched, "minute");
+            if (sched.contains("timezone") && sched["timezone"].is_string())
+                t.schedule.timezone = sched["timezone"].get<std::string>();
             if (sched.contains("interval_seconds") && sched["interval_seconds"].is_number())
                 t.schedule.interval = std::chrono::seconds(json_int_field(sched, "interval_seconds"));
             if (sched.contains("delay_seconds") && sched["delay_seconds"].is_number())
@@ -336,6 +418,59 @@ static bool task_from_json(const nlohmann::json& j, ScheduledTask& t) {
     }
 }
 
+namespace {
+
+const char* schedule_host_id() {
+#if defined(__ANDROID__)
+    return "android";
+#else
+    return "desktop";
+#endif
+}
+
+void fill_schedule_receipt(const ScheduledTask& t, nlohmann::json& j) {
+    const bool phone = std::string(schedule_host_id()) == "android";
+    j["host"] = schedule_host_id();
+    j["where"] = phone ? "This phone" : "This computer";
+    j["delivery"] = delivery_kind_id(t.delivery);
+    if (t.execution == ExecutionKind::Notification) {
+        if (phone) {
+            j["hears"] = "Phone notification";
+            j["limit"] = t.precision == SchedulePrecision::TimeSensitive
+                             ? "Exact only after exact alarms are allowed."
+                             : "A short delay can fire late.";
+        } else {
+            j["hears"] = "Saved here";
+            j["limit"] = "Does not notify the phone.";
+        }
+    } else if (t.execution == ExecutionKind::Tool) {
+        j["hears"] = t.delivery == DeliveryKind::Notification ? (phone ? "Phone notification" : "Saved here")
+                                                              : "Chat";
+        j["limit"] = phone ? "Runs even when chat is closed. A short delay can fire late."
+                           : "Runs while this app is open.";
+    } else if (t.delivery == DeliveryKind::Silent) {
+        j["hears"] = "Saved only";
+        j["limit"] = "Nothing is shown when it finishes.";
+    } else {
+        j["hears"] = t.delivery == DeliveryKind::Notification ? (phone ? "Phone notification" : "Saved here")
+                                                              : "Chat";
+        j["limit"] = phone ? "Runs even when chat is closed. A short delay can fire late."
+                           : "Runs while this app is open.";
+    }
+}
+
+} // namespace
+
+nlohmann::json task_saved_json(const ScheduledTask& t) {
+    nlohmann::json j;
+    j["task_id"] = t.id;
+    j["title"] = t.title;
+    j["execution"] = execution_kind_id(t.execution);
+    if (t.next_run_at) j["next_run_at"] = format_iso8601(*t.next_run_at);
+    fill_schedule_receipt(t, j);
+    return j;
+}
+
 nlohmann::json task_to_summary_json(const ScheduledTask& t) {
     nlohmann::json j;
     j["id"]      = t.id;
@@ -346,12 +481,14 @@ nlohmann::json task_to_summary_json(const ScheduledTask& t) {
         case ScheduleKind::At:    j["schedule_kind"] = "at";    break;
         case ScheduleKind::In:    j["schedule_kind"] = "in";    break;
         case ScheduleKind::Every: j["schedule_kind"] = "every"; break;
+        case ScheduleKind::Daily: j["schedule_kind"] = "daily"; break;
     }
     if (t.schedule.interval) j["interval_seconds"] = static_cast<int>(t.schedule.interval->count());
     if (t.next_run_at)       j["next_run_at"]      = format_iso8601(*t.next_run_at);
     if (t.last_run_at)       j["last_run_at"]      = format_iso8601(*t.last_run_at);
     if (!t.last_error.empty() && t.consecutive_failures > 0) j["last_error"] = t.last_error;
     j["execution"] = execution_kind_id(t.execution);
+    fill_schedule_receipt(t, j);
     if (t.occurrence_status != OccurrenceStatus::None)
         j["occurrence_status"] = occurrence_status_id(t.occurrence_status);
     return j;
@@ -386,8 +523,14 @@ compute_initial_next_run(const ScheduleSpec& spec) {
             if (spec.start_at) return *spec.start_at;
             if (spec.interval) return now + *spec.interval;
             return std::nullopt;
+        case ScheduleKind::Daily:
+            return next_daily_instant(now - std::chrono::seconds(1), spec.hour, spec.minute, spec.timezone);
     }
     return std::nullopt;
+}
+
+void set_schedule_daily_clock(ScheduleDailyClock clock) {
+    g_daily_clock = clock;
 }
 
 // ── Scheduler files ──────────────────────────────────────────────────────────
@@ -566,7 +709,8 @@ DueBeginResult task_store_begin_due(const std::string& id,
         out.generation = task.generation;
         return out;
     }
-    if (task.execution == ExecutionKind::Agent && !run_agents) {
+    if ((task.execution == ExecutionKind::Agent || task.execution == ExecutionKind::Tool)
+        && !run_agents) {
         out.action = DueBeginAction::Blocked;
         out.task = task;
         return out;
@@ -576,6 +720,8 @@ DueBeginResult task_store_begin_due(const std::string& id,
     next.occurrence_status = OccurrenceStatus::Running;
     next.occurrence_planned_at = next.next_run_at;
     next.occurrence_id = next.id + "|" + format_iso8601(*next.next_run_at);
+    if (next.execution == ExecutionKind::Tool && next.idempotency_key.empty())
+        next.idempotency_key = next.occurrence_id;
     next.updated_at = now_iso8601();
     if (!persist_task_locked(next)) {
         logger::warn("[scheduler] claim persist failed id=" + id);
@@ -624,7 +770,8 @@ bool task_store_finish_due(const std::string& id,
                            bool ok,
                            const std::string& text,
                            const std::string& error,
-                           bool notification_event) {
+                           bool notification_event,
+                           const nlohmann::json& files) {
     auto& s = store();
     std::unique_lock<std::mutex> lk(s.mutex);
     ensure_tasks_loaded_locked(s);
@@ -668,8 +815,25 @@ bool task_store_finish_due(const std::string& id,
         ev["sound"] = next.sound;
     } else {
         ev["type"] = "tick_result";
+        if (!next.occurrence_id.empty()) ev["run_id"] = next.occurrence_id;
         if (!text.empty()) ev["final_text"] = text;
         if (!error.empty()) ev["error"] = error;
+        if (files.is_array()) {
+            nlohmann::json kept = nlohmann::json::array();
+            for (const auto& row : files) {
+                if (!row.is_object())
+                    continue;
+                const std::string path = row.value("path", std::string{});
+                if (path.empty())
+                    continue;
+                kept.push_back({
+                    {"path", path},
+                    {"tool", row.value("tool", std::string{})},
+                });
+            }
+            if (!kept.empty())
+                ev["files"] = std::move(kept);
+        }
     }
     push_event_locked(next, std::move(ev));
 

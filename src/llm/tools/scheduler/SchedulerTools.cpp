@@ -3,6 +3,7 @@
 
 #include "llm/agent_memory.hpp"
 
+#include <cctype>
 #include <chrono>
 
 namespace media::llm::path::detail {
@@ -18,12 +19,47 @@ std::string apply_schedule_policy(const nlohmann::json& args, media::llm::agent:
         return "sound must be a boolean";
     const std::string execution = args.value("execution", std::string{"agent"});
     const std::string precision = args.value("precision", std::string{"best_effort"});
-    if (execution != "agent" && execution != "notification")
-        return "execution must be agent or notification";
+    if (execution != "agent" && execution != "notification" && execution != "tool")
+        return "execution must be agent, notification, or tool";
     if (precision != "best_effort" && precision != "time_sensitive")
         return "precision must be best_effort or time_sensitive";
     if (precision == "time_sensitive" && execution != "notification")
         return "precision time_sensitive is only valid for a notification";
+    if (args.contains("delivery") && args["delivery"].is_string()) {
+        const std::string delivery = args["delivery"].get<std::string>();
+        if (delivery != "inbox" && delivery != "notification" && delivery != "silent")
+            return "delivery must be inbox, notification, or silent";
+    }
+    if (execution == "tool") {
+        if (!args.contains("tool") || !args["tool"].is_string())
+            return "tool name is required";
+        const std::string name = args["tool"].get<std::string>();
+        if (name.empty())
+            return "tool name is required";
+        if (!media::llm::agent::scheduled_tool_allowed(name))
+            return "tool is not allowlisted";
+        if (args.contains("arguments") && !args["arguments"].is_object())
+            return "arguments must be an object";
+        task.execution = media::llm::agent::ExecutionKind::Tool;
+        task.tool_name = name;
+        task.tool_args = args.contains("arguments") ? args["arguments"] : nlohmann::json::object();
+        if (name == "http_request") {
+            const std::string url = task.tool_args.value("url", std::string{});
+            if (url.rfind("https://", 0) != 0)
+                return "http_request requires an https url";
+        }
+        task.precision = media::llm::agent::SchedulePrecision::BestEffort;
+        task.sound = false;
+        task.delivery = media::llm::agent::DeliveryKind::Inbox;
+        if (args.contains("delivery") && args["delivery"].is_string()) {
+            const std::string delivery = args["delivery"].get<std::string>();
+            if (delivery == "notification")
+                task.delivery = media::llm::agent::DeliveryKind::Notification;
+            else if (delivery == "silent")
+                task.delivery = media::llm::agent::DeliveryKind::Silent;
+        }
+        return {};
+    }
     task.execution = execution == "notification"
                          ? media::llm::agent::ExecutionKind::Notification
                          : media::llm::agent::ExecutionKind::Agent;
@@ -33,7 +69,17 @@ std::string apply_schedule_policy(const nlohmann::json& args, media::llm::agent:
     task.sound = args.value("sound", false);
     if (task.execution == media::llm::agent::ExecutionKind::Notification)
         task.delivery = media::llm::agent::DeliveryKind::Notification;
-    else {
+    else if (args.contains("delivery") && args["delivery"].is_string()) {
+        const std::string delivery = args["delivery"].get<std::string>();
+        if (delivery == "notification")
+            task.delivery = media::llm::agent::DeliveryKind::Notification;
+        else if (delivery == "silent")
+            task.delivery = media::llm::agent::DeliveryKind::Silent;
+        else
+            task.delivery = media::llm::agent::DeliveryKind::Inbox;
+        if (task.delivery != media::llm::agent::DeliveryKind::Notification)
+            task.sound = false;
+    } else {
         task.delivery = media::llm::agent::DeliveryKind::Inbox;
         task.sound = false;
     }
@@ -44,10 +90,18 @@ nlohmann::json schedule_extra_properties() {
     return {
         {"execution",
          {{"type", "string"},
-          {"enum", nlohmann::json::array({"agent", "notification"})},
+          {"enum", nlohmann::json::array({"agent", "notification", "tool"})},
           {"description",
            "agent runs the prompt as a model turn. notification shows title and prompt "
-           "as a reminder and does not call the model. Default agent."}}},
+           "as a reminder and does not call the model. tool runs one allowlisted call "
+           "(write_file or https http_request) with arguments frozen at create and does not call the model. "
+           "Default agent."}}},
+        {"tool",
+         {{"type", "string"},
+          {"description", "Tool name for execution=tool. write_file or http_request."}}},
+        {"arguments",
+         {{"type", "object"},
+          {"description", "Arguments for execution=tool. Stored as given and reused on each fire."}}},
         {"precision",
          {{"type", "string"},
           {"enum", nlohmann::json::array({"best_effort", "time_sensitive"})},
@@ -95,7 +149,10 @@ ExecuteResult do_schedule_at(const nlohmann::json& args) {
     const std::string id = media::llm::agent::task_store_create(std::move(task));
     if (id.empty())
         return simple_error("could not save the scheduled task");
-    return simple_ok(nlohmann::json{{"task_id", id}});
+    const auto saved = media::llm::agent::task_store_get(id);
+    if (!saved)
+        return simple_ok(nlohmann::json{{"task_id", id}});
+    return simple_ok(media::llm::agent::task_saved_json(*saved));
 }
 
 ExecuteResult do_schedule_in(const nlohmann::json& args) {
@@ -124,7 +181,10 @@ ExecuteResult do_schedule_in(const nlohmann::json& args) {
     const std::string id = media::llm::agent::task_store_create(std::move(task));
     if (id.empty())
         return simple_error("could not save the scheduled task");
-    return simple_ok(nlohmann::json{{"task_id", id}});
+    const auto saved = media::llm::agent::task_store_get(id);
+    if (!saved)
+        return simple_ok(nlohmann::json{{"task_id", id}});
+    return simple_ok(media::llm::agent::task_saved_json(*saved));
 }
 
 ExecuteResult do_schedule_every(const nlohmann::json& args) {
@@ -132,17 +192,38 @@ ExecuteResult do_schedule_every(const nlohmann::json& args) {
         return simple_error("schedule_every: 'title' (string) is required");
     if (!args.contains("prompt") || !args["prompt"].is_string())
         return simple_error("schedule_every: 'prompt' (string) is required");
-    if (!args.contains("interval_seconds") || !args["interval_seconds"].is_number())
+    const bool daily = args.contains("time") && args["time"].is_string();
+    if (!daily && (!args.contains("interval_seconds") || !args["interval_seconds"].is_number()))
         return simple_error("schedule_every: 'interval_seconds' (integer) is required");
 
-    const int secs = args["interval_seconds"].get<int>();
-    if (secs < 5) return simple_error("schedule_every: interval_seconds must be >= 5");
-
     media::llm::agent::ScheduledTask task;
-    task.title              = args["title"].get<std::string>();
-    task.prompt             = args["prompt"].get<std::string>();
-    task.schedule.kind      = media::llm::agent::ScheduleKind::Every;
-    task.schedule.interval  = std::chrono::seconds(secs);
+    task.title = args["title"].get<std::string>();
+    task.prompt = args["prompt"].get<std::string>();
+    if (daily) {
+        const std::string clock = args["time"].get<std::string>();
+        int hour = 0;
+        int minute = 0;
+        if (clock.size() != 5 || clock[2] != ':'
+            || !std::isdigit(static_cast<unsigned char>(clock[0]))
+            || !std::isdigit(static_cast<unsigned char>(clock[1]))
+            || !std::isdigit(static_cast<unsigned char>(clock[3]))
+            || !std::isdigit(static_cast<unsigned char>(clock[4])))
+            return simple_error("schedule_every: time must be HH:MM");
+        hour = std::stoi(clock.substr(0, 2));
+        minute = std::stoi(clock.substr(3, 2));
+        if (hour > 23 || minute > 59)
+            return simple_error("schedule_every: time must be HH:MM");
+        task.schedule.kind = media::llm::agent::ScheduleKind::Daily;
+        task.schedule.hour = hour;
+        task.schedule.minute = minute;
+        if (args.contains("timezone") && args["timezone"].is_string())
+            task.schedule.timezone = args["timezone"].get<std::string>();
+    } else {
+        const int secs = args["interval_seconds"].get<int>();
+        if (secs < 5) return simple_error("schedule_every: interval_seconds must be >= 5");
+        task.schedule.kind = media::llm::agent::ScheduleKind::Every;
+        task.schedule.interval = std::chrono::seconds(secs);
+    }
 
     if (args.contains("start_at") && args["start_at"].is_string()) {
         if (const auto tp = media::llm::agent::parse_iso8601(args["start_at"].get<std::string>()))
@@ -160,7 +241,10 @@ ExecuteResult do_schedule_every(const nlohmann::json& args) {
     const std::string id = media::llm::agent::task_store_create(std::move(task));
     if (id.empty())
         return simple_error("could not save the scheduled task");
-    return simple_ok(nlohmann::json{{"task_id", id}});
+    const auto saved = media::llm::agent::task_store_get(id);
+    if (!saved)
+        return simple_ok(nlohmann::json{{"task_id", id}});
+    return simple_ok(media::llm::agent::task_saved_json(*saved));
 }
 
 ExecuteResult do_schedule_cancel(const nlohmann::json& args) {
@@ -224,7 +308,8 @@ ToolDef make_schedule_in() {
         "Schedule a one-shot task to run after a delay. "
         "Use when the user says 'in 30 seconds', 'after 5 minutes', or 'remind me'. "
         "execution=agent (default) runs the prompt. execution=notification is the reminder "
-        "and does not call the model. precision=time_sensitive is only valid for notification. "
+        "and does not call the model. execution=tool runs write_file with arguments frozen "
+        "at create and does not call the model. precision=time_sensitive is only valid for notification. "
         "Saved on disk. An agent task runs while the app is open, and once on the next start "
         "if it came due while the app was closed.",
         {
@@ -238,7 +323,9 @@ ToolDef make_schedule_every() {
     nlohmann::json properties = {
         {"title",            {{"type", "string"}}},
         {"prompt",           {{"type", "string"}}},
-        {"interval_seconds", {{"type", "integer"}, {"minimum", 5}, {"description", "Seconds between ticks. A few seconds only fire while the app is running."}}},
+        {"interval_seconds", {{"type", "integer"}, {"minimum", 5}, {"description", "Seconds between ticks. Omit when time is set."}}},
+        {"time", {{"type", "string"}, {"description", "Daily local clock HH:MM. Uses timezone, or UTC when timezone is omitted."}}},
+        {"timezone", {{"type", "string"}, {"description", "IANA zone for time, for example Europe/Madrid."}}},
         {"start_at",         {{"type", "string"}, {"description", "Optional ISO 8601 UTC start time. Defaults to now + interval."}}},
         {"max_runs",         {{"type", "integer"}, {"minimum", 1}, {"description", "Optional cap on total runs; omit for unlimited."}}},
         {"initial_state",    {{"type", "object"}}},

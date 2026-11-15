@@ -32,6 +32,8 @@ struct AgentTickResult {
     bool        ok = false;
     std::string text;
     std::string error;
+    /// Registered tool files for this run. `{path, tool}` rows. Reply text is not scanned.
+    nlohmann::json files = nlohmann::json::array();
 };
 
 class AgentScheduler {
@@ -46,6 +48,8 @@ public:
                    EventCallback     on_tick_event = nullptr);
 
     void start();
+    /// One turn with the configured provider. Does not start the poll.
+    AgentTickResult run_tick(const ScheduledTask& task);
     /// Ask the loop to leave. Does not abort process-global TTS or shell.
     /// The in-flight scheduled turn sees this through `Turn::cancel_check`.
     /// A second `stop()` waits until the thread that owns the join has finished.
@@ -93,7 +97,8 @@ nlohmann::json run_due(std::chrono::system_clock::time_point now,
                        bool run_agents,
                        std::function<AgentTickResult(const ScheduledTask&)> run_agent,
                        std::function<bool()> should_stop = {},
-                       std::function<std::chrono::system_clock::time_point()> now_source = {});
+                       std::function<std::chrono::system_clock::time_point()> now_source = {},
+                       std::function<AgentTickResult(const ScheduledTask&)> run_tool = {});
 
 /// Next best-effort reminder and next time-sensitive reminder, separately.
 nlohmann::json schedule_next_wakeup();

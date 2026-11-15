@@ -13,12 +13,14 @@ enum class ScheduleKind {
     At,     // absolute one-shot   — run_at
     In,     // relative one-shot   — delay
     Every,  // repeating interval  — interval [+ start_at] [+ max_runs]
+    Daily,  // wall clock in a timezone — hour, minute, timezone
 };
 
 /// What a due task runs. Missing JSON means Agent, so older files stay agent turns.
 enum class ExecutionKind {
     Agent,
     Notification,
+    Tool,
 };
 
 enum class DeliveryKind {
@@ -57,6 +59,11 @@ struct ScheduleSpec {
     std::optional<std::chrono::seconds> interval;
     std::optional<std::chrono::system_clock::time_point> start_at;
     std::optional<int> max_runs;
+
+    // Daily. timezone is an IANA name. Empty means UTC.
+    int hour = 0;
+    int minute = 0;
+    std::string timezone;
 };
 
 struct ScheduledTask {
@@ -73,6 +80,11 @@ struct ScheduledTask {
     DeliveryKind  delivery  = DeliveryKind::Inbox;
     SchedulePrecision precision = SchedulePrecision::BestEffort;
     bool         sound = false;
+    /// Frozen call. Set at create and not rewritten when the task fires.
+    std::string  tool_name;
+    nlohmann::json tool_args = nlohmann::json::object();
+    /// Written with the claim, before the call. An interrupted claim keeps it.
+    std::string  idempotency_key;
 
     // ── runtime state ─────────────────────────────────────────────────────────
     std::optional<std::chrono::system_clock::time_point> next_run_at;
@@ -133,7 +145,8 @@ struct DueBeginResult {
 };
 
 /// Claim one due task, or settle a claim left `running` by a dead process.
-/// `run_agents` false skips agent tasks without writing them (notifications still claim).
+/// `run_agents` false skips agent and tool tasks without writing them
+/// (notifications still claim).
 DueBeginResult task_store_begin_due(const std::string& id,
                                     std::chrono::system_clock::time_point now,
                                     bool run_agents);
@@ -146,7 +159,8 @@ bool task_store_finish_due(const std::string& id,
                            bool ok,
                            const std::string& text,
                            const std::string& error,
-                           bool notification_event);
+                           bool notification_event,
+                           const nlohmann::json& files = {});
 
 /// Drop a claim when the agent runner was not invoked. Does not re-enable a cancel.
 void task_store_release_unrun(const std::string& id, int expected_generation);
@@ -179,9 +193,23 @@ void schedule_store_invalidate();
 
 nlohmann::json task_to_json(const ScheduledTask& t);
 nlohmann::json task_to_summary_json(const ScheduledTask& t);
+/// What create tells the person: host, next time, where the result goes, and the limit.
+nlohmann::json task_saved_json(const ScheduledTask& t);
 const char* execution_kind_id(ExecutionKind kind);
 const char* precision_id(SchedulePrecision precision);
 const char* occurrence_status_id(OccurrenceStatus status);
 const char* schedule_wakeup_kind(const ScheduledTask& task);
+
+/// The calls a frozen tool task may name. Camera, shell, and delete stay off.
+bool scheduled_tool_allowed(const std::string& name);
+
+/// Next daily instant strictly after `after`. The Android host installs a
+/// zone converter. Without one, the hour is read as UTC.
+using ScheduleDailyClock = std::optional<std::chrono::system_clock::time_point> (*)(
+    std::chrono::system_clock::time_point after,
+    int hour,
+    int minute,
+    const std::string& timezone);
+void set_schedule_daily_clock(ScheduleDailyClock clock);
 
 } // namespace media::llm::agent
