@@ -855,8 +855,8 @@ ExecuteResult do_camera_phone(const nlohmann::json& args) {
         {"height", body.value("height", 0)},
         {"bytes", body.value("bytes", 0)},
         {"note", explicit_path
-            ? "Pass path to image_understand."
-            : "Saved in the camera roll. Pass path to image_understand."},
+            ? "Pass output_path to image_understand."
+            : "Pass output_path to image_understand. The Android Save to device setting controls the camera-roll copy."},
     };
     return build_envelope("image_from_camera", {std::move(r)});
 }
@@ -1122,7 +1122,8 @@ ToolDef make_transform() {
         "Do NOT call image_meta first to 'see' the image \u2014 "
         "Gemini reads the bytes itself and a recon meta call is pure overhead. "
         "Writes the edited raster next to each source unless `output_path` (single input) or `output_paths` "
-        "(one per input) is provided. "
+        "(one per input) is provided. On Android, the returned `output_path` is authoritative: Tanit keeps "
+        "a tool-readable file and Settings \u2192 Save to device controls the additional Pictures copy. "
         "**Do not** use this tool for Replicate **image-to-video** (MP4 from a selected photo): it always sends "
         "`image_input` + `output_format` in the shape of an **image** edit API, which fails validation on Wan, MiniMax, "
         "Kling-style i2v slugs (\u201cimage is required\u201d / wrong fields). For video-from-selection, call **create_video** "
@@ -1186,7 +1187,9 @@ ToolDef make_image_create() {
         "There is no `paths` input file; output is written from the prompt alone, or pass "
         "**reference image paths** (options.reference_images, or `references` / `reference`) for style / layout / logo. "
         "`output_path` is optional; if omitted, a default filename is chosen from the prompt. "
-        "To edit an existing file in place, use image_transform instead.",
+        "On Android, always use the returned `output_path`; Tanit keeps that working file and "
+        "Settings \u2192 Save to device controls the additional Pictures copy. "
+        "To edit an existing image rather than create one from scratch, use image_transform instead.",
         parse_schema(R"json({
             "type": "object",
             "properties": {
@@ -1312,9 +1315,10 @@ ToolDef make_camera() {
         "image_from_camera",
         "Capture a still image from a camera and save it as a JPEG.\n\n"
         "On a phone the default is the back camera. Pass facing=\"front\" for the "
-        "selfie camera. Omit output_path to save into the camera roll (DCIM/Camera), "
-        "the same folder the camera app uses. The result path is a normal image file: "
-        "pass it to image_understand to describe the photo. action=\"list\" names the "
+        "selfie camera. The result `output_path` is a normal, tool-readable image file. "
+        "Settings \u2192 Save to device decides whether Tanit also places a copy in "
+        "the camera roll (DCIM/Camera). "
+        "Pass it to image_understand to describe the photo. action=\"list\" names the "
         "front and back cameras.\n\n"
         "On desktop:\n"
         "  1. Call with action=\"list\" to discover webcams and their resolutions.\n"
@@ -1357,7 +1361,7 @@ ToolDef make_camera() {
                 },
                 "output_path": {
                     "type": "string",
-                    "description": "Destination file path (.jpg, .png, or .bmp). Relative paths resolve to the current context folder (same as other tools). Omit to auto-generate a timestamped filename in the context folder (or system temp when no folder is set)."
+                    "description": "Working file path (.jpg, .png, or .bmp). Relative paths resolve to the current context folder. On Android, the returned output_path is authoritative and the Save to device setting independently controls the camera-roll copy. Omit to auto-generate a timestamped filename."
                 }
             },
             "required": []

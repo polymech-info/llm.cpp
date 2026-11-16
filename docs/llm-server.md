@@ -273,7 +273,7 @@ Today: `tools[]` is ignored (compat). When this surface is productized, **reject
 | POST | `/v1/realtime/speaker` | Body `{ enabled }`. Mute or resume desktop realtime playback |
 | POST | `/v1/realtime/cancel-agent` | Cancel the delegated `run_pm_agent` without stopping voice |
 | GET | `/v1/realtime/events` | SSE `{ method, args }`. `realtimeLevel` is the latest mic level, delivered on its own so a caught-up client still sees movement. Keepalive every 15s |
-| POST | `/v1/llm/path-tools/call` | Body `{ name, arguments }`. Direct path-tool execute. 400 without `name` |
+| POST | `/v1/llm/path-tools/call` | Body `{ name, arguments }`. Direct path-tool execute. Requires `tools` for paired devices; `files` is not sufficient. 400 without `name` |
 | GET | `/v1/vfs/mounts` | Folder bookmarks with `share`. Each row is `vfs://desktop/<name>` |
 | GET | `/v1/vfs/resolve` | Query `path` (absolute). `{ ok, item:{ path, shared, uri?, mount?, rel? } }` |
 | POST | `/v1/vfs/resolve` | Body `{ paths:[...] }` (max 64). `{ ok, items:[...] }`. Unshared rows are `shared:false` |
@@ -306,6 +306,9 @@ Auth (when `--serve-api-key` / `TANIT_SERVE_API_KEY` set): required on every
 `/v1/*` route except `GET /v1/models` on the direct HTTP port. `/health` and `/ready` stay open.
 Host-tool register and list, and `POST /v1/browser/page-model/rank`, are machine-local
 (403 from a paired phone). A paired-device token is a second bearer; see LAN pairing below.
+Unknown `/v1/*` routes do not inherit `chat`: paired-device scope routing is
+explicit and defaults to deny. Request bodies are capped at 500 MiB process-wide;
+individual routes such as VFS writes keep their smaller limits.
 
 ### LAN discovery and pairing (desktop)
 
@@ -359,8 +362,8 @@ Scopes are `chat`, `files`, `tools`, `video`, and `audio`. Omit `scopes` to take
 (default: chat, files, and tools — not video, not audio). `chat` is completions, sessions, speak,
 realtime control/events, and `POST /v1/logs`. Starting realtime requires both `chat` and `tools`, because
 the Voice Agent exposes delegated `run_pm_agent`; a chat-only device forces `no_tools`
-on completions. `files` is `POST /v1/llm/path-tools/call`,
-`POST /v1/ui/open-file`, and `/v1/vfs/*`. `tools` is the agent tool loop plus `/v1/chat/commands/run`,
+on completions. `files` is `POST /v1/ui/open-file` and `/v1/vfs/*`.
+`tools` is the agent tool loop, `POST /v1/llm/path-tools/call`, plus `/v1/chat/commands/run`,
 `/v1/llm/each`, `/v1/llm/decide`, and `/v1/ui/open`. `video` is `/v1/video/*` (screen
 capture plus pointer and key injection). `audio` is `/v1/audio/*` (microphone, loopback,
 and mix). A chat-only device cannot call either. Ask for them
@@ -635,6 +638,23 @@ Keep bind on loopback unless you intentionally expose the agent surface.
 - [ ] Fix >~8 concurrent agent-turn hang
 - [x] OpenDesign: host `IAgentToolProvider` + chat cleanup (no JSON scrape / follow-up flags)
 
+### Security
+
+- [x] Paired `files` scope cannot call the general path-tool dispatcher (`run`,
+  computer/browser control, deletion, and service tools require `tools`).
+- [x] Paired-device route scope lookup defaults to deny instead of silently
+  granting `chat` to an unclassified `/v1/*` route.
+- [x] Cap HTTP request bodies at 500 MiB; retain smaller route-level limits.
+- [ ] Bind streamed consent and ask replies to the authenticated device,
+  session, turn, and `reqId`; remove the process-global top-emitter behavior.
+- [ ] Propagate SSE disconnect and Stop into request-scoped cancellation so
+  provider/tool work and its concurrency slot terminate.
+- [ ] Refuse non-loopback cleartext HTTP by default. Keep the TLS pairing
+  listener as the phone route; require an explicit unsafe override for legacy
+  cleartext binds.
+- [ ] Restrict per-request provider base URL overrides from paired clients to a
+  host-owned HTTPS origin allowlist.
+
 ### Ops
 
 - [x] `/ready` + `/health.ready` / `auth_required`
@@ -647,6 +667,10 @@ Keep bind on loopback unless you intentionally expose the agent surface.
 - [x] `npm run test:llm-server:bench` — proxy + TTFT + concurrency 1/2/4/8
 - [x] Safe default `--in-flight` ≤ 8; `matrix:1k` uses 8
 - [x] Tools suite: `npm run test:llm-server:tools` (loopback) + `:tools:local-gemma`
+- [x] LAN scope regression: a `files`-only paired token can use VFS but receives
+  `403 insufficient_scope` from `/v1/llm/path-tools/call`.
+- [x] Oversized declared request regression: payloads above 500 MiB receive 413
+  without materializing the body.
 - [ ] Warm tokens/sec (real models)
 - [ ] Mixed-preset queue latency (real models)
 

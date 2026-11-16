@@ -160,6 +160,12 @@ struct TranslationSession::Impl {
     std::atomic<uint64_t> pcm_chunks_sent{0};
     std::atomic<uint64_t> audio_chunks_recv{0};
 
+    std::chrono::steady_clock::time_point connect_at{};
+    std::mutex switch_mu;
+    bool switch_waiting = false;
+    std::chrono::steady_clock::time_point switch_at{};
+    std::string switch_to;
+
     bool send_event(const nlohmann::json& j) {
         if (!curl) return false;
         const std::string wire = j.dump();
@@ -262,6 +268,7 @@ bool TranslationSession::open(const Config& cfg, Callbacks cb, std::string& err)
     tr_log("TranslationSession.open model=" + model + " lang=" + cfg.language
            + " url=" + translation_ws_url(cfg.base_url));
 
+    m_->connect_at = std::chrono::steady_clock::now();
     m_->open_flag.store(true);
     m_->stop_flag.store(false);
     if (!m_->send_event(make_session_update(m_->cfg))) {
@@ -398,7 +405,31 @@ void TranslationSession::Impl::dispatch_event(const nlohmann::json& j) {
 
     if (typ == "session.updated") {
         accept_pcm.store(true);
-        if (!connected_notified.exchange(true) && cb.on_state) cb.on_state(true);
+        const auto now = std::chrono::steady_clock::now();
+        if (!connected_notified.exchange(true)) {
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                now - connect_at)
+                                .count();
+            tr_log("TranslationSession: warmup_ms=" + std::to_string(ms)
+                   + " lang=" + cfg.language);
+            if (cb.on_state) cb.on_state(true);
+        }
+        std::string switched;
+        long long switch_ms = -1;
+        {
+            std::lock_guard<std::mutex> lk(switch_mu);
+            if (switch_waiting) {
+                switch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                now - switch_at)
+                                .count();
+                switched = switch_to;
+                switch_waiting = false;
+            }
+        }
+        if (!switched.empty()) {
+            tr_log("TranslationSession: language=" + switched
+                   + " warmup_ms=" + std::to_string(switch_ms));
+        }
         return;
     }
 
@@ -446,6 +477,12 @@ void TranslationSession::send_pcm(const int16_t* pcm, size_t frame_count) {
 
 void TranslationSession::update_language(const std::string& language) {
     if (!m_->open_flag.load() || language.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(m_->switch_mu);
+        m_->switch_to = language;
+        m_->switch_at = std::chrono::steady_clock::now();
+        m_->switch_waiting = true;
+    }
     m_->cfg.language = language;
     m_->send_event(make_session_update(m_->cfg));
 }

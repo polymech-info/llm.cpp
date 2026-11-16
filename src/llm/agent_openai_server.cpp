@@ -1029,16 +1029,34 @@ bool device_scope_ok(const lan::DeviceAuth& dev, const httplib::Request& req)
         return dev.has("audio");
     if (path.rfind("/v1/vfs", 0) == 0)
         return dev.has("files");
-    if (path == "/v1/llm/path-tools/call" || path == "/v1/ui/open-file")
+    // This endpoint dispatches the complete path-tool registry, including
+    // run, computer-use, browser, file deletion, and service tools. A files
+    // grant is intentionally limited to VFS and opening a selected file.
+    if (path == "/v1/llm/path-tools/call")
+        return dev.has("tools");
+    if (path == "/v1/ui/open-file")
         return dev.has("files") || dev.has("tools");
     if (path == "/v1/chat/commands/run" || path == "/v1/llm/each" || path == "/v1/llm/decide"
-        || path == "/v1/ui/open" || path == "/v1/realtime/cancel-agent")
+        || path == "/v1/ui/open" || path == "/v1/realtime/cancel-agent"
+        || path == "/v1/sysprobe")
         return dev.has("tools");
     if (path == "/v1/realtime/start")
         return dev.has("chat") && dev.has("tools");
     if (path == "/v1/host-tool-providers" || path == "/v1/browser/page-model/rank")
         return false;
-    return dev.has("chat");
+    if (path == "/v1/credit" || path == "/v1/speak" || path == "/v1/speak/stop"
+        || path == "/v1/speak/pause" || path == "/v1/speak/resume"
+        || path == "/v1/chat/completions" || path == "/v1/chat/commands"
+        || path == "/v1/chat/events" || path == "/v1/chat/consent"
+        || path == "/v1/chat/ask" || path == "/v1/chat/skills"
+        || path == "/v1/chat/recent-paths" || path == "/v1/chat/typeahead-presets"
+        || path == "/v1/chat/search-names" || path == "/v1/chat/xblox-artifacts"
+        || path == "/v1/chat/sessions" || path == "/v1/chat/session"
+        || path == "/v1/realtime/stop" || path == "/v1/realtime/ptt"
+        || path == "/v1/realtime/speaker" || path == "/v1/realtime/events")
+        return dev.has("chat");
+    // Scope routing is a security boundary. New routes must opt into a scope.
+    return false;
 }
 
 bool lan_completion_without_tools(const httplib::Request& req, const std::string& serve_api_key)
@@ -3961,6 +3979,11 @@ int run_llm_agent_openai_server(const AgentServerOptions& opt)
         (std::max)(0, http_workers - options.concurrency - reserve_control);
     InflightGate gate(options.concurrency, max_waiting);
     auto         svr = std::make_shared<httplib::Server>();
+    // Transport ceiling. Individual routes retain their smaller limits
+    // (for example, 32 MiB decoded mobile attachments and 8 MiB VFS writes).
+    // cpp-httplib materializes request bodies, so callers should not send
+    // several near-limit requests concurrently.
+    svr->set_payload_max_length(500u * 1024u * 1024u);
     svr->new_task_queue = [http_workers] {
         return new httplib::ThreadPool(static_cast<size_t>(http_workers));
     };

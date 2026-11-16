@@ -425,7 +425,9 @@ ToolDef make_create_video() {
         "**Single-call rule: at most one `create_video` per user request.** Never auto-retry after a failure. "
         "Tanit aliases (`video-fast`, `video-deep`) use LiteLLM `/v1/videos` (OpenRouter Veo). "
         "Replicate slugs keep the native predictions path. The reply carries "
-        "`results[0].result.intended_output_path` (and `output_path` when `ok`).",
+        "`results[0].result.intended_output_path` (and `output_path` when `ok`). "
+        "Always use the successful `output_path` as authoritative. On Android, Tanit keeps that "
+        "tool-readable file and Settings \u2192 Save to device controls the additional Movies copy.",
         create_video_fallback_input_schema(),
     };
 }
