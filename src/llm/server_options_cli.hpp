@@ -4,6 +4,8 @@
 // Tanit's HTTP daemon and pm-llm both fill AgentServerOptions and call these
 // helpers. Route registration, the turn loop, video, LAN, and IPC stay on the host.
 
+#include "pm/server/features.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
@@ -54,6 +56,8 @@ struct AgentServerOptions {
     std::string lan_name;
     bool pair_on_start = false;
     std::string pair_scopes;
+    /// Route groups this process mounts. Defaults are the desktop serve surface.
+    pm::server::ServerFeatures features{};
 };
 
 inline bool server_env_truthy(const char* value)
