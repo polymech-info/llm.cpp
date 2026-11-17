@@ -867,6 +867,66 @@ bool save_session_memory_document(const std::string& session_id,
 #endif
 }
 
+bool delete_session_sidecars(const std::string& session_id, std::string& err)
+{
+    err.clear();
+    const std::string id = safe_uri_segment(agent::sanitize_session_id(session_id));
+    if (id.empty() || id == "session")
+        return true;
+    const std::string memory_uri = "pm://session-memory/" + id;
+    const std::string session_uri_s = "pm://session/" + id;
+    const std::string log_prefix = "pm://session-log/" + id + "__";
+    const std::string artifact_prefix = "pm://session-artifact/" + id;
+#if defined(FEATURE_SECURE_STORAGE) && FEATURE_SECURE_STORAGE
+    if (using_secure_storage()) {
+        const StoreOptions options = active_options();
+        const auto paths = secure_paths(options);
+        const auto docs = pm::storage::list_documents(paths);
+        if (docs.ok) {
+            for (const auto& meta : docs.items) {
+                const bool mine = meta.uri == memory_uri || meta.uri == session_uri_s
+                    || meta.uri.rfind(log_prefix, 0) == 0
+                    || meta.uri.rfind(artifact_prefix, 0) == 0;
+                if (!mine)
+                    continue;
+                const auto deleted = pm::storage::delete_document(paths, meta.uri);
+                if (!deleted.ok && deleted.error.rfind("document not found:", 0) != 0) {
+                    err = deleted.error;
+                    return false;
+                }
+            }
+        }
+    }
+#else
+    (void)memory_uri;
+    (void)session_uri_s;
+    (void)log_prefix;
+    (void)artifact_prefix;
+#endif
+    const std::filesystem::path documents = agent::session_store_dir() / "resources" / "documents";
+    std::error_code ec;
+    if (std::filesystem::is_directory(documents, ec)) {
+        const std::string memory_slug = "session-memory__" + id;
+        const std::string log_slug = "session-log__" + id + "__";
+        const std::string session_slug = "session__" + id;
+        const std::string artifact_slug = "session-artifact__" + id;
+        for (const auto& entry : std::filesystem::directory_iterator(documents, ec)) {
+            if (ec)
+                break;
+            if (!entry.is_regular_file(ec))
+                continue;
+            const std::string name = media::path::path_to_utf8(entry.path().filename());
+            const bool named = name.rfind(memory_slug, 0) == 0
+                || name.rfind(log_slug, 0) == 0
+                || name.rfind(session_slug, 0) == 0
+                || name.rfind(artifact_slug, 0) == 0;
+            if (named)
+                std::filesystem::remove(entry.path(), ec);
+        }
+    }
+    return true;
+}
+
 bool delete_session_memory_document(const std::string& session_id, std::string& err)
 {
     err.clear();

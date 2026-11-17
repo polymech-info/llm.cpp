@@ -48,8 +48,13 @@ public:
         std::function<void(const std::string& delta)> on_output_transcript;
         // Source-language transcript deltas (session.input_transcript.delta).
         std::function<void(const std::string& delta)> on_input_transcript;
+        // Authoritative utterance, including punctuation the deltas omitted.
+        std::function<void(const std::string& transcript)> on_output_transcript_done;
+        std::function<void(const std::string& transcript)> on_input_transcript_done;
         // true after session.updated; false on close.
         std::function<void(bool connected)> on_state;
+        // First ready, and each later language switch, once session.updated lands.
+        std::function<void(const std::string& language, long long warmup_ms)> on_language;
         std::function<void(const std::string& message)> on_error;
         std::function<void(const std::string& message)> on_auth_error;
         std::function<void(const std::string& message)> on_network_error;
@@ -74,7 +79,8 @@ public:
 
     // Send session.close, wait for session.closed (or timeout), then tear down.
     // Prefer this over close() when the source stream ends so trailing output is kept.
-    bool finish(std::string& err);
+    // timeout_ms < 0 uses Config::close_drain_timeout_ms.
+    bool finish(std::string& err, int timeout_ms = -1);
 
     // Hard teardown (no session.close drain). Idempotent, any-thread.
     void close();

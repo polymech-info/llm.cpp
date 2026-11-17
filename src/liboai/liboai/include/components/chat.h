@@ -14,6 +14,7 @@
 #include "../core/authorization.h"
 #include "../core/response.h"
 
+#include <functional>
 #include <limits>
 #include <optional>
 #include <nlohmann/json.hpp>
@@ -913,6 +914,11 @@ namespace liboai {
 			/// upload) before the POST. Null clears the hook.
 			using ChatBodyMutator = void (*)(nlohmann::json& body);
 			LIBOAI_EXPORT static void SetBodyMutator(ChatBodyMutator mutator) noexcept;
+
+			/// `tanit.event` frames on a chat stream (consent). Return false to abort.
+			/// The handler may block. Empty clears the hook.
+			using StreamEventHandler = std::function<bool(const nlohmann::json& event)>;
+			LIBOAI_EXPORT static void SetStreamEventHandler(StreamEventHandler handler);
 
 			/*
 				@brief Creates a completion for the chat message.

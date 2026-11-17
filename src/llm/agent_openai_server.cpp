@@ -51,6 +51,7 @@
 #endif
 #if defined(FEATURE_AUDIO_SOURCES) && FEATURE_AUDIO_SOURCES
 #include "pm/audio/source_host.hpp"
+#include "pm/audio/sink_host.hpp"
 #endif
 
 #if defined(_WIN32)
@@ -70,6 +71,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cctype>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -107,6 +109,7 @@ static void stop_llm_video_host()
 
 #if defined(FEATURE_AUDIO_SOURCES) && FEATURE_AUDIO_SOURCES
 static std::shared_ptr<pm::audio::SourceHost> g_llm_audio_host;
+static std::shared_ptr<pm::audio::SinkHost> g_llm_audio_sink;
 #endif
 
 static void stop_llm_audio_host()
@@ -114,6 +117,8 @@ static void stop_llm_audio_host()
 #if defined(FEATURE_AUDIO_SOURCES) && FEATURE_AUDIO_SOURCES
     if (g_llm_audio_host)
         g_llm_audio_host->stop();
+    if (g_llm_audio_sink)
+        g_llm_audio_sink->stop();
 #endif
 }
 
@@ -162,11 +167,13 @@ public:
     class Slot {
     public:
         /// Acquire a turn slot. When the concurrency limit is hit, park until a
-        /// slot frees — unless the waiter cap is already full, then @ref ok is
-        /// false and the caller should return HTTP 503.
-        explicit Slot(InflightGate& g) : g_(&g)
+        /// slot frees or @p wait_ms elapses. A full waiter cap or a timed-out
+        /// park leaves @ref ok false (HTTP 503).
+        explicit Slot(InflightGate& g, int wait_ms) : g_(&g)
         {
             const auto t0 = std::chrono::steady_clock::now();
+            const int budget = wait_ms > 0 ? wait_ms : 180000;
+            const auto deadline = t0 + std::chrono::milliseconds(budget);
             std::unique_lock lock(g_->mu_);
             if (g_->inflight_ >= g_->max_n_) {
                 if (g_->max_waiting_ > 0 && g_->waiting_ >= g_->max_waiting_) {
@@ -178,10 +185,19 @@ public:
                 if (g_->waiting_ > g_->peak_waiting_)
                     g_->peak_waiting_ = g_->waiting_;
                 ++g_->waited_;
-                g_->cv_.wait(lock, [&] {
+                const bool got = g_->cv_.wait_until(lock, deadline, [&] {
                     return g_->inflight_ < g_->max_n_;
                 });
                 --g_->waiting_;
+                if (!got) {
+                    ++g_->rejected_;
+                    expired_ = true;
+                    g_ = nullptr;
+                    queue_wait_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - t0)
+                                         .count();
+                    return;
+                }
             }
             queue_wait_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
                                  std::chrono::steady_clock::now() - t0)
@@ -190,9 +206,13 @@ public:
             ++g_->accepted_;
             if (g_->inflight_ > g_->peak_inflight_)
                 g_->peak_inflight_ = g_->inflight_;
+            media::cli::push_turn_deadline(t0 + std::chrono::milliseconds(budget));
+            deadline_armed_ = true;
         }
         ~Slot()
         {
+            if (deadline_armed_)
+                media::cli::pop_turn_deadline();
             if (!g_)
                 return;
             {
@@ -206,11 +226,15 @@ public:
 
         bool ok() const { return g_ != nullptr; }
         explicit operator bool() const { return ok(); }
+        /// The wait budget elapsed before a slot freed.
+        bool expired() const { return expired_; }
         long long queue_wait_ms() const { return queue_wait_ms_; }
 
     private:
         InflightGate* g_             = nullptr;
         long long     queue_wait_ms_ = 0;
+        bool          expired_       = false;
+        bool          deadline_armed_ = false;
     };
 
 private:
@@ -774,7 +798,34 @@ TurnOutcome run_one_completion(const AgentServerOptions& opt,
     } consent_restore{consent_ticket, ask_ticket};
 #endif
 
-    logger::info("llm-server turn phase=agent_start id=" + request_id);
+    const int budget_ms = prov.timeout_ms > 0 ? prov.timeout_ms : 180000;
+    const auto turn_deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
+    auto turn_cancel = std::make_shared<std::atomic<bool>>(false);
+    auto turn_cancel_logged = std::make_shared<std::atomic<bool>>(false);
+    turn.cancel_signal = turn_cancel;
+    turn.cancel_check = [turn_deadline, budget_ms, turn_cancel, turn_cancel_logged, request_id]() {
+        if (turn_cancel->load())
+            return true;
+        if (media::cli::turn_deadline_reached()
+            || std::chrono::steady_clock::now() >= turn_deadline) {
+            if (!turn_cancel_logged->exchange(true))
+                logger::warn("llm-server turn phase=deadline id=" + request_id
+                             + " timeout_ms=" + std::to_string(budget_ms));
+            turn_cancel->store(true);
+            return true;
+        }
+        if (!media::cli::turn_client_connected()) {
+            if (!turn_cancel_logged->exchange(true))
+                logger::warn("llm-server turn phase=client_closed id=" + request_id);
+            turn_cancel->store(true);
+            return true;
+        }
+        return false;
+    };
+
+    logger::info("llm-server turn phase=agent_start id=" + request_id
+                 + " timeout_ms=" + std::to_string(budget_ms));
     auto result = media::llm::agent::run_agent_turn(
         turn, prov, runner_opt, [&](const media::llm::agent::Event& ev) {
             if (ev.kind == media::llm::agent::Event::TextDelta) {
@@ -885,13 +936,20 @@ TurnOutcome run_one_completion(const AgentServerOptions& opt,
 /// Inherit server provider credentials only when the request is not redirecting
 /// to a foreign base URL (avoids attaching the daemon key to a caller URL).
 
-void respond_queue_full(httplib::Response& res)
+int serve_budget_ms(const AgentServerOptions& opt)
+{
+    return opt.timeout_ms > 0 ? opt.timeout_ms : 180000;
+}
+
+void respond_queue_full(httplib::Response& res, bool expired)
 {
     res.status = 503;
     res.set_header("Retry-After", "1");
     res.set_content(
-        openai_error("server busy: turn concurrency queue is full", "server_error",
-                     "queue_full")
+        openai_error(expired ? "timed out waiting for a free turn"
+                             : "server busy: turn concurrency queue is full",
+                     "server_error",
+                     expired ? "queue_timeout" : "queue_full")
             .dump(),
         "application/json");
 }
@@ -3075,9 +3133,9 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
                      }
                  }
 
-                 InflightGate::Slot slot(gate);
+                 InflightGate::Slot slot(gate, serve_budget_ms(opt));
                  if (!slot) {
-                     respond_queue_full(res);
+                     respond_queue_full(res, slot.expired());
                      return;
                  }
                  const std::string req_cwd = resolve_request_cwd(req, body, opt);
@@ -3116,9 +3174,9 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
                          "application/json");
                      return;
                  }
-                 InflightGate::Slot slot(gate);
+                 InflightGate::Slot slot(gate, serve_budget_ms(opt));
                  if (!slot) {
-                     respond_queue_full(res);
+                     respond_queue_full(res, slot.expired());
                      return;
                  }
                  const std::string req_cwd = resolve_request_cwd(req, body, opt);
@@ -3188,9 +3246,9 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
                          "application/json");
                      return;
                  }
-                 InflightGate::Slot slot(gate);
+                 InflightGate::Slot slot(gate, serve_budget_ms(opt));
                  if (!slot) {
-                     respond_queue_full(res);
+                     respond_queue_full(res, slot.expired());
                      return;
                  }
                  const std::string req_cwd = resolve_request_cwd(req, body, opt);
@@ -3279,10 +3337,11 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
                                       + " inflight=" + std::to_string(gs.inflight)
                                       + " waiting=" + std::to_string(gs.waiting));
                      }
-                     auto slot = std::make_shared<InflightGate::Slot>(gate);
+                     auto slot = std::make_shared<InflightGate::Slot>(gate, serve_budget_ms(turn_opt));
                      if (!*slot) {
-                         logger::warn("llm-server request phase=gate_rejected id=" + request_id);
-                         respond_queue_full(res);
+                         logger::warn("llm-server request phase=gate_rejected id=" + request_id
+                                      + (slot->expired() ? " reason=timeout" : " reason=full"));
+                         respond_queue_full(res, slot->expired());
                          return;
                      }
                      logger::info("llm-server request phase=gate_acquired id=" + request_id
@@ -3302,6 +3361,11 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
                              (void)browser;
                              const auto t_exec0 = std::chrono::steady_clock::now();
                              bool client_connected = true;
+                             media::cli::ScopedTurnClientProbe client_probe([&]() {
+                                 if (!client_connected)
+                                     return false;
+                                 return !sink.is_writable || sink.is_writable();
+                             });
                              auto emit = [&sink, &client_connected, &request_id](
                                              std::string_view wire) -> bool {
                                  const bool ok = sink.write(wire.data(), wire.size());
@@ -3373,10 +3437,11 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
                                   + " inflight=" + std::to_string(gs.inflight)
                                   + " waiting=" + std::to_string(gs.waiting));
                  }
-                 InflightGate::Slot slot(gate);
+                 InflightGate::Slot slot(gate, serve_budget_ms(turn_opt));
                  if (!slot) {
-                     logger::warn("llm-server request phase=gate_rejected id=" + request_id);
-                     respond_queue_full(res);
+                     logger::warn("llm-server request phase=gate_rejected id=" + request_id
+                                  + (slot.expired() ? " reason=timeout" : " reason=full"));
+                     respond_queue_full(res, slot.expired());
                      return;
                  }
                  logger::info("llm-server request phase=gate_acquired id=" + request_id
@@ -3587,6 +3652,98 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
                 });
         });
     }
+    g_llm_audio_sink = std::make_shared<pm::audio::SinkHost>();
+    {
+        const auto sink = g_llm_audio_sink;
+        auto write_sink = [](httplib::Response& res, const pm::audio::SinkReply& reply) {
+            res.status = reply.status;
+            res.set_content(reply.body.dump(2) + "\n", "application/json; charset=utf-8");
+        };
+        auto read_body = [](const httplib::Request& req, httplib::Response& res, nlohmann::json& body) -> bool {
+            try {
+                body = req.body.empty() ? nlohmann::json::object() : nlohmann::json::parse(req.body);
+            } catch (const std::exception& ex) {
+                res.status = 400;
+                res.set_content(nlohmann::json{{"ok", false},
+                                               {"error", std::string("invalid JSON: ") + ex.what()}}
+                                    .dump(2) + "\n",
+                                "application/json; charset=utf-8");
+                return false;
+            }
+            return true;
+        };
+        svr.Get("/v1/audio/outputs", [sink, require_v1_auth, write_sink](const httplib::Request& req,
+                                                                         httplib::Response& res) {
+            if (!require_v1_auth(req, res))
+                return;
+            write_sink(res, sink->outputs());
+        });
+        svr.Post("/v1/audio/output", [sink, require_v1_auth, write_sink, read_body](const httplib::Request& req,
+                                                                                    httplib::Response& res) {
+            if (!require_v1_auth(req, res))
+                return;
+            nlohmann::json body;
+            if (!read_body(req, res, body))
+                return;
+            write_sink(res, sink->select(body));
+        });
+        svr.Post("/v1/audio/play/start", [sink, require_v1_auth, write_sink, read_body](const httplib::Request& req,
+                                                                                        httplib::Response& res) {
+            if (!require_v1_auth(req, res))
+                return;
+            nlohmann::json body;
+            if (!read_body(req, res, body))
+                return;
+            write_sink(res, sink->start(body));
+        });
+        svr.Post("/v1/audio/play/stop", [sink, require_v1_auth, write_sink](const httplib::Request& req,
+                                                                            httplib::Response& res) {
+            if (!require_v1_auth(req, res))
+                return;
+            sink->stop();
+            auto reply = sink->status();
+            reply.body["accepted"] = true;
+            reply.body["stopped"] = true;
+            write_sink(res, reply);
+        });
+        svr.Post("/v1/audio/play", [sink, require_v1_auth, write_sink](const httplib::Request& req,
+                                                                       httplib::Response& res) {
+            if (!require_v1_auth(req, res))
+                return;
+            if (req.body.size() > 256u * 1024u) {
+                res.status = 413;
+                res.set_content(nlohmann::json{{"ok", false}, {"error", "audio chunk is too large"}}.dump(2) + "\n",
+                                "application/json; charset=utf-8");
+                return;
+            }
+            auto header_u32 = [&](const char* key, std::uint32_t fallback) {
+                if (!req.has_header(key))
+                    return fallback;
+                try {
+                    const unsigned long parsed = std::stoul(req.get_header_value(key));
+                    if (parsed == 0 || parsed > 96000)
+                        return fallback;
+                    return static_cast<std::uint32_t>(parsed);
+                } catch (...) {
+                    return fallback;
+                }
+            };
+            const std::uint32_t rate = header_u32("X-Audio-Sample-Rate", 48000);
+            const std::uint32_t channels = header_u32("X-Audio-Channels", 2);
+            const std::uint32_t width = std::max<std::uint32_t>(1, std::min<std::uint32_t>(channels, 8));
+            if (req.body.size() < static_cast<size_t>(width) * sizeof(std::int16_t)) {
+                res.status = 400;
+                res.set_content(nlohmann::json{{"ok", false}, {"error", "audio chunk is empty"}}.dump(2) + "\n",
+                                "application/json; charset=utf-8");
+                return;
+            }
+            const size_t samples = req.body.size() / sizeof(std::int16_t);
+            const int frames = static_cast<int>(samples / width);
+            std::vector<std::int16_t> pcm(static_cast<size_t>(frames) * width);
+            std::memcpy(pcm.data(), req.body.data(), pcm.size() * sizeof(std::int16_t));
+            write_sink(res, sink->push(pcm.data(), frames, rate, width));
+        });
+    }
 #else
     auto audio_unavailable = [require_v1_auth](const httplib::Request& req, httplib::Response& res) {
         if (!require_v1_auth(req, res))
@@ -3597,9 +3754,10 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
                             .dump(),
                         "application/json");
     };
-    for (const char* path : {"/v1/audio/status", "/v1/audio/sources", "/v1/audio/stream"})
+    for (const char* path : {"/v1/audio/status", "/v1/audio/sources", "/v1/audio/stream", "/v1/audio/outputs"})
         svr.Get(path, audio_unavailable);
-    for (const char* path : {"/v1/audio/start", "/v1/audio/stop", "/v1/audio/source"})
+    for (const char* path : {"/v1/audio/start", "/v1/audio/stop", "/v1/audio/source", "/v1/audio/output",
+                             "/v1/audio/play", "/v1/audio/play/start", "/v1/audio/play/stop"})
         svr.Post(path, audio_unavailable);
 #endif
 
@@ -4070,7 +4228,7 @@ int run_llm_agent_openai_server(const AgentServerOptions& opt)
     std::cout << "llm agent --serve: " << base
               << "  (GET /health, GET /v1/models, POST /v1/chat/completions,"
               << " POST /v1/llm/each, POST /v1/llm/decide, GET /v1/video/status,"
-              << " GET /v1/audio/sources; concurrency="
+              << " GET /v1/audio/sources, GET /v1/audio/outputs; concurrency="
               << options.concurrency << "; max_waiting=" << max_waiting
               << "; http_workers=" << http_workers
               << "; auth=" << (options.serve_api_key.empty() ? "off" : "on")

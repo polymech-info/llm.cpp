@@ -765,11 +765,13 @@ Answer ask_via_stream(const Question& q)
     for (;;) {
         if (future.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready)
             break;
-        if (media::cli::cancel_requested()) {
+        if (media::cli::cancel_requested() || media::cli::turn_deadline_reached()
+            || !media::cli::turn_client_connected()) {
+            const bool timed_out = media::cli::turn_deadline_reached();
             slot->finish(nlohmann::json{
                 {"reqId", req_id},
                 {"stoppedBy", "cancelled"},
-                {"error", "ask_user: cancelled"},
+                {"error", timed_out ? "ask_user: timed out" : "ask_user: cancelled"},
             });
             break;
         }

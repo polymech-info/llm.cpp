@@ -683,52 +683,49 @@ bool session_delete(const std::string& session_id) {
     auto& s = store();
     std::unique_lock<std::mutex> lk(s.mutex);
 
-    bool dropped = false;
     auto it = s.sessions.find(session_id);
-    if (it != s.sessions.end()) {
+    if (it != s.sessions.end())
         s.sessions.erase(it);
-        dropped = true;
-    }
 
     const std::string fid = sanitize_session_id(session_id);
     if (fid.empty())
         return false;
-    if (media::llm::chat_sessions::using_secure_storage()) {
-        std::string err;
-        const bool removed_memory = media::llm::chat_sessions::delete_session_memory_document(fid, err);
-        if (!removed_memory) {
-            logger::error("session delete memory failed id=" + session_id + " " + err);
-            return false;
-        }
-        err.clear();
-        const bool removed_journal = media::llm::chat_sessions::delete_session_log_document(fid, "journal", err);
-        if (!removed_journal) {
-            logger::error("session delete journal failed id=" + session_id + " " + err);
-            return false;
-        }
-        return true;
+    std::string sidecar_err;
+    if (!media::llm::chat_sessions::delete_session_sidecars(fid, sidecar_err)) {
+        logger::error("session delete documents failed id=" + session_id + " " + sidecar_err);
+        return false;
     }
+    const fs::path dir = session_store_dir();
     const fs::path path = session_file_path_for(fid);
     const fs::path journal_path = session_journal_path_unlocked(session_id);
     std::error_code ec;
-    const bool session_existed = fs::exists(path, ec) && !ec;
-    ec.clear();
-    if (session_existed && !fs::remove(path, ec)) {
+    if (fs::exists(path, ec) && !ec && !fs::remove(path, ec)) {
         logger::error("session delete failed id=" + session_id + " " + ec.message());
         return false;
     }
-    bool journal_existed = false;
     {
         std::lock_guard<std::mutex> journal_lk(journal_mutex());
         ec.clear();
-        journal_existed = fs::exists(journal_path, ec) && !ec;
-        ec.clear();
-        if (journal_existed && !fs::remove(journal_path, ec)) {
+        if (fs::exists(journal_path, ec) && !ec && !fs::remove(journal_path, ec)) {
             logger::error("session journal delete failed id=" + session_id + " " + ec.message());
             return false;
         }
     }
-    return dropped || session_existed || journal_existed;
+    ec.clear();
+    if (fs::is_directory(dir, ec)) {
+        const std::string prefix = fid + ".";
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+            if (ec)
+                break;
+            if (!entry.is_regular_file(ec))
+                continue;
+            const std::string name = media::path::path_to_utf8(entry.path().filename());
+            if (name.rfind(prefix, 0) != 0)
+                continue;
+            fs::remove(entry.path(), ec);
+        }
+    }
+    return true;
 }
 
 // ── Named session snapshots (P12) ────────────────────────────────────────────

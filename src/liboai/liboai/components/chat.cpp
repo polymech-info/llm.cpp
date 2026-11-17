@@ -5,6 +5,8 @@
 namespace {
 std::mutex g_chat_body_mu;
 liboai::ChatCompletion::ChatBodyMutator g_chat_body_mutator = nullptr;
+std::mutex g_chat_stream_event_mu;
+std::function<bool(const nlohmann::json&)> g_chat_stream_event;
 }
 
 liboai::Conversation::Conversation() {
@@ -644,7 +646,21 @@ bool liboai::Conversation::ParseStreamData(std::string data, std::string& delta_
 			try {
 				j = nlohmann::json::parse(line);
 			} catch (const std::exception& e) {
+				// `event: tanit.consent` is SSE framing, not a partial JSON chunk.
+				if (line.find('{') == std::string::npos)
+					continue;
 				_last_incomplete_buffer = line;
+				continue;
+			}
+
+			if (j.is_object() && j.value("object", std::string{}) == "tanit.event") {
+				std::function<bool(const nlohmann::json&)> hook;
+				{
+					std::lock_guard<std::mutex> lock(g_chat_stream_event_mu);
+					hook = g_chat_stream_event;
+				}
+				if (hook && !hook(j))
+					return false;
 				continue;
 			}
 
@@ -716,6 +732,11 @@ bool liboai::Conversation::ParseStreamData(std::string data, std::string& delta_
 void liboai::ChatCompletion::SetBodyMutator(ChatBodyMutator mutator) noexcept {
 	std::lock_guard<std::mutex> lock(g_chat_body_mu);
 	g_chat_body_mutator = mutator;
+}
+
+void liboai::ChatCompletion::SetStreamEventHandler(StreamEventHandler handler) {
+	std::lock_guard<std::mutex> lock(g_chat_stream_event_mu);
+	g_chat_stream_event = std::move(handler);
 }
 
 liboai::Response liboai::ChatCompletion::create(const std::string& model, Conversation& conversation, std::optional<std::string> function_call, std::optional<float> temperature, std::optional<float> top_p, std::optional<uint16_t> n, std::optional<ChatStreamCallback> stream, std::optional<std::vector<std::string>> stop, std::optional<uint16_t> max_tokens, std::optional<float> presence_penalty, std::optional<float> frequency_penalty, std::optional<std::unordered_map<std::string, int8_t>> logit_bias, std::optional<std::string> user, std::optional<nlohmann::json> response_format, std::optional<nlohmann::json> tools, std::optional<nlohmann::json> tool_choice, std::optional<std::string> reasoning_effort) const& noexcept(false) {

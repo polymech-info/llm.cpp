@@ -17,6 +17,7 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -165,6 +166,24 @@ struct TranslationSession::Impl {
     bool switch_waiting = false;
     std::chrono::steady_clock::time_point switch_at{};
     std::string switch_to;
+    std::string input_acc;
+    std::string output_acc;
+
+    // Deltas sometimes arrive as bare words. A space-only delta is a real
+    // token; a missing boundary between two words is not.
+    static std::string shape_delta(std::string& acc, const std::string& delta) {
+        if (delta.empty())
+            return {};
+        std::string piece = delta;
+        if (!acc.empty() && !piece.empty()) {
+            const unsigned char prev = static_cast<unsigned char>(acc.back());
+            const unsigned char next = static_cast<unsigned char>(piece.front());
+            if (std::isalnum(prev) && std::isalnum(next))
+                piece.insert(piece.begin(), ' ');
+        }
+        acc += piece;
+        return piece;
+    }
 
     bool send_event(const nlohmann::json& j) {
         if (!curl) return false;
@@ -389,14 +408,35 @@ void TranslationSession::Impl::dispatch_event(const nlohmann::json& j) {
     }
 
     if (typ == "session.output_transcript.delta") {
-        if (cb.on_output_transcript && j.contains("delta") && j["delta"].is_string())
-            cb.on_output_transcript(j["delta"].get<std::string>());
+        if (cb.on_output_transcript && j.contains("delta") && j["delta"].is_string()) {
+            const std::string piece = shape_delta(output_acc, j["delta"].get<std::string>());
+            if (!piece.empty())
+                cb.on_output_transcript(piece);
+        }
         return;
     }
 
     if (typ == "session.input_transcript.delta") {
-        if (cb.on_input_transcript && j.contains("delta") && j["delta"].is_string())
-            cb.on_input_transcript(j["delta"].get<std::string>());
+        if (cb.on_input_transcript && j.contains("delta") && j["delta"].is_string()) {
+            const std::string piece = shape_delta(input_acc, j["delta"].get<std::string>());
+            if (!piece.empty())
+                cb.on_input_transcript(piece);
+        }
+        return;
+    }
+
+    if (typ == "session.output_transcript.done" || typ == "session.input_transcript.done") {
+        const bool input = typ.find("input") != std::string::npos;
+        const std::string full = j.value("transcript", std::string());
+        if (input)
+            input_acc.clear();
+        else
+            output_acc.clear();
+        if (input) {
+            if (cb.on_input_transcript_done) cb.on_input_transcript_done(full);
+        } else if (cb.on_output_transcript_done) {
+            cb.on_output_transcript_done(full);
+        }
         return;
     }
 
@@ -413,6 +453,7 @@ void TranslationSession::Impl::dispatch_event(const nlohmann::json& j) {
             tr_log("TranslationSession: warmup_ms=" + std::to_string(ms)
                    + " lang=" + cfg.language);
             if (cb.on_state) cb.on_state(true);
+            if (cb.on_language) cb.on_language(cfg.language, ms);
         }
         std::string switched;
         long long switch_ms = -1;
@@ -429,6 +470,7 @@ void TranslationSession::Impl::dispatch_event(const nlohmann::json& j) {
         if (!switched.empty()) {
             tr_log("TranslationSession: language=" + switched
                    + " warmup_ms=" + std::to_string(switch_ms));
+            if (cb.on_language) cb.on_language(switched, switch_ms);
         }
         return;
     }
@@ -487,7 +529,7 @@ void TranslationSession::update_language(const std::string& language) {
     m_->send_event(make_session_update(m_->cfg));
 }
 
-bool TranslationSession::finish(std::string& err) {
+bool TranslationSession::finish(std::string& err, int timeout_ms) {
     if (!m_->curl) {
         err = "TranslationSession: not open";
         return false;
@@ -504,12 +546,13 @@ bool TranslationSession::finish(std::string& err) {
         tr_log("TranslationSession: session.close sent — draining");
     }
 
-    const int timeout_ms = m_->cfg.close_drain_timeout_ms > 0
-        ? m_->cfg.close_drain_timeout_ms : 30000;
+    const int wait_ms = timeout_ms >= 0
+        ? timeout_ms
+        : (m_->cfg.close_drain_timeout_ms > 0 ? m_->cfg.close_drain_timeout_ms : 30000);
     {
         std::unique_lock<std::mutex> lk(m_->closed_mu);
         const bool ok = m_->closed_cv.wait_for(
-            lk, std::chrono::milliseconds(timeout_ms),
+            lk, std::chrono::milliseconds(wait_ms),
             [this] { return m_->session_closed.load() || m_->stop_flag.load(); });
         if (!ok && !m_->session_closed.load()) {
             err = "TranslationSession: timed out waiting for session.closed";

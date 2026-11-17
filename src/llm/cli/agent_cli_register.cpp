@@ -542,8 +542,8 @@ void pm_image_register_llm(CLI::App& app, PmImageCliState& s) {
         ->default_val(8090)
         ->group("Server");
     s.llm_agent_cmd->add_option("--concurrency", s.ag_serve_concurrency,
-        "Max concurrent agent turns for --serve (default 2).")
-        ->default_val(2)
+        "Max concurrent agent turns for --serve (default 32).")
+        ->default_val(32)
         ->group("Server");
     s.llm_agent_cmd->add_option("--http-workers", s.ag_serve_http_workers,
         "httplib worker threads for --serve (default: max(32, concurrency*2); "

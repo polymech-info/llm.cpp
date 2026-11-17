@@ -76,8 +76,8 @@ nlohmann::json session_journal_read(const std::string& session_id);
 /// Session ids that have a persisted memory file, sorted.
 std::vector<std::string> session_list_persisted();
 
-/// Drop the in-memory session and delete its JSON and journal. Pending
-/// schedule deliveries are not touched.
+/// Drop the in-memory session and delete its JSON, journal, transcript, and
+/// memory and log documents. Pending schedule deliveries are not touched.
 bool session_delete(const std::string& session_id);
 
 /// Read only the persisted memory_state blob for a session (no event log,

@@ -497,6 +497,21 @@ LLMResponse LLMClient::execute_chat(const std::string& prompt) {
 
 // ── chat-completions SSE (stream=true) ─────────────────────────────────────
 
+namespace {
+std::mutex g_tanit_sse_mu;
+std::function<bool(const nlohmann::json&)> g_tanit_sse;
+}
+
+void set_chat_sse_tanit_handler(std::function<bool(const nlohmann::json& event)> handler)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_tanit_sse_mu);
+        g_tanit_sse = handler;
+    }
+    // The live voice turn is this same chat stream, read by liboai.
+    liboai::ChatCompletion::SetStreamEventHandler(std::move(handler));
+}
+
 struct ChatSseAcc {
     std::string buf;
     std::string raw;
@@ -517,11 +532,38 @@ struct ChatSseAcc {
     std::map<int, Tool> tools;
 };
 
+namespace {
+bool dispatch_tanit_sse(const nlohmann::json& event, ChatSseAcc& acc)
+{
+    std::function<bool(const nlohmann::json&)> hook;
+    {
+        std::lock_guard<std::mutex> lock(g_tanit_sse_mu);
+        hook = g_tanit_sse;
+    }
+    if (!hook)
+        return true;
+    bool ok = true;
+    try {
+        ok = hook(event);
+    } catch (const std::exception& e) {
+        acc.error = e.what();
+        return false;
+    }
+    if (!ok) {
+        acc.cancelled = true;
+        return false;
+    }
+    return true;
+}
+} // namespace
+
 bool chat_sse_apply_json(const nlohmann::json& j,
                          ChatSseAcc& acc,
                          const std::function<bool(const std::string&)>& on_text_delta)
 {
     if (!j.is_object()) return true;
+    if (j.value("object", std::string{}) == "tanit.event")
+        return dispatch_tanit_sse(j, acc);
     if (j.contains("error") && !j["error"].is_null()) {
         const auto& err = j["error"];
         if (err.is_string())

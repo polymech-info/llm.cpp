@@ -232,9 +232,13 @@ Today: `tools[]` is ignored (compat). When this surface is productized, **reject
 4. Headless consent: `--consent-ui` is `auto-deny`, `auto-allow`, `cli`, `win32`,
    or `stream`. An empty flag on a serve turn falls through to the preset, then
    `auto-deny`. `stream` posts the card on the open SSE (or the realtime event
-   queue) and blocks until `POST /v1/chat/consent`. A process already listening
+   queue) and blocks until `POST /v1/chat/consent`, the turn timeout, or the
+   SSE client dropping. A process already listening
    keeps the mode it was started with.
-5. Concurrent turns: soft gate via `--concurrency N` (default small, e.g. 2–4).
+5. Concurrent turns: soft gate via `--concurrency N` (default 32). A turn, and the
+   queue for a free slot, give up at `--timeout-ms` (default 180000). That covers
+   a stream consent or ask park and a dropped SSE client: the park denies, the
+   slot returns, and a later request is not stuck behind it.
 6. Store / shipping: keep off product matrices until explicitly productized.
 7. llama-server sidecar: **out of scope** (parked); local remains `router=llama` in-process or Custom→HTTP.
 8. No new queue/network deps for MVP.
@@ -647,8 +651,8 @@ Keep bind on loopback unless you intentionally expose the agent surface.
 - [x] Cap HTTP request bodies at 500 MiB; retain smaller route-level limits.
 - [ ] Bind streamed consent and ask replies to the authenticated device,
   session, turn, and `reqId`; remove the process-global top-emitter behavior.
-- [ ] Propagate SSE disconnect and Stop into request-scoped cancellation so
-  provider/tool work and its concurrency slot terminate.
+- [x] Propagate SSE disconnect and the turn timeout into request-scoped
+  cancellation so a consent/ask park and its concurrency slot terminate.
 - [ ] Refuse non-loopback cleartext HTTP by default. Keep the TLS pairing
   listener as the phone route; require an explicit unsafe override for legacy
   cleartext binds.

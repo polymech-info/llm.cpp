@@ -101,6 +101,14 @@ struct LLMResponse {
 /** Process-once DNS/TLS warmup so the first chat POST can reuse libcurl's share. */
 POLYMECH_API void warmup_llm_http_async();
 
+/**
+ * Desktop `llm agent --serve` writes `{"object":"tanit.event"}` into the chat
+ * stream (consent, consent.dismiss). Return false to abort the stream. The
+ * handler may block; it runs on the HTTP read thread. Empty clears the hook.
+ */
+POLYMECH_API void set_chat_sse_tanit_handler(
+    std::function<bool(const nlohmann::json& event)> handler);
+
 class POLYMECH_API LLMClient {
 public:
     // Initialize the client with the options (api_key, model, router).

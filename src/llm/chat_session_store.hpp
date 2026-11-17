@@ -73,6 +73,8 @@ bool save_session_memory_document(const std::string& session_id,
                                   const nlohmann::json& document,
                                   std::string& err);
 bool delete_session_memory_document(const std::string& session_id, std::string& err);
+/// Memory, every log, and the session document for one id. Missing documents are fine.
+bool delete_session_sidecars(const std::string& session_id, std::string& err);
 bool load_session_log_document(const std::string& session_id,
                                const std::string& log_id,
                                nlohmann::json& out_document,

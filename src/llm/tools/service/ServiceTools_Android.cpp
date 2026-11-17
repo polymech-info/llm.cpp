@@ -10,6 +10,7 @@
 #include "cms/cms_host.hpp"
 #include "cms/pm_cms_ai_gateway.hpp"
 #include "cms/pm_cms_download.hpp"
+#include "cms/pm_cms_identity.hpp"
 #include "cms/pm_cms_list.hpp"
 #include "cms/pm_cms_pages.hpp"
 #include "cms/pm_cms_posts.hpp"
@@ -146,6 +147,13 @@ bool append_cms_history_entry(const nlohmann::json&, std::string& err, size_t)
 namespace pm::android {
 namespace {
 
+std::string bundle_string(const nlohmann::json& bundle, const char* key)
+{
+  if (!bundle.is_object() || !bundle.contains(key) || !bundle[key].is_string())
+    return {};
+  return bundle[key].get<std::string>();
+}
+
 bool open_session(const std::string& profile_dir, pm::cms::CmsSession& session, std::string& err)
 {
   pm::cms::install_host_hooks();
@@ -156,6 +164,57 @@ bool open_session(const std::string& profile_dir, pm::cms::CmsSession& session, 
     return false;
   err.clear();
   return pm::cms::resolve_cms_session(pm::k_tanit_service_server_base_default_u8, session, err);
+}
+
+} // namespace
+
+void remember_account_identity(nlohmann::json& bundle)
+{
+  if (!bundle.is_object())
+    return;
+  if (!bundle_string(bundle, "app_user_id").empty() && !bundle_string(bundle, "app_username").empty())
+    return;
+  pm::cms::LoginTokenContext tokens;
+  tokens.access_token = bundle_string(bundle, "access_token");
+  tokens.id_token = bundle_string(bundle, "id_token");
+  if (tokens.access_token.empty() && tokens.id_token.empty())
+    return;
+  const std::string base = pm::services::resolve_cms_server_base(bundle_string(bundle, "cms_server_base"));
+  if (base.empty())
+    return;
+  const pm::cms::LoginIdentityEnrichment identity = pm::cms::enrich_login_identity(base, tokens);
+  auto put = [&](const char* key, const std::string& value) {
+    if (!value.empty() && bundle_string(bundle, key).empty())
+      bundle[key] = value;
+  };
+  put("app_user_id", identity.app_user_id);
+  put("app_username", identity.app_username);
+  put("app_display_name", identity.app_display_name);
+  put("zitadel_sub", identity.zitadel_sub);
+  put("api_bearer_source", identity.api_bearer_source);
+  if (!identity.roles.is_null() && !bundle.contains("roles"))
+    bundle["roles"] = identity.roles;
+  if (bundle_string(bundle, "cms_server_base").empty())
+    bundle["cms_server_base"] = base;
+}
+
+namespace {
+
+void ensure_account_identity(const std::string& profile_dir)
+{
+  nlohmann::json bundle;
+  std::string err;
+  if (!oauth_load(profile_dir, bundle, err))
+    return;
+  const bool had_id = !bundle_string(bundle, "app_user_id").empty();
+  const bool had_name = !bundle_string(bundle, "app_username").empty();
+  if (had_id && had_name)
+    return;
+  remember_account_identity(bundle);
+  if (bundle_string(bundle, "app_user_id").empty() && bundle_string(bundle, "app_username").empty())
+    return;
+  std::string save_err;
+  oauth_save(profile_dir, bundle, save_err);
 }
 
 bool remote_target(const std::string& mount,
@@ -719,6 +778,7 @@ nlohmann::json service_post_create(const std::string& profile_dir,
   pm::cms::CmsSession session;
   if (!open_session(profile_dir, session, err))
     return {};
+  ensure_account_identity(profile_dir);
   const fs::path file(image_path);
   if (!fs::is_regular_file(file)) {
     err = "image file not found";
@@ -748,6 +808,7 @@ nlohmann::json service_files_upload(const std::string& profile_dir,
   pm::cms::CmsSession session;
   if (!open_session(profile_dir, session, err))
     return {};
+  ensure_account_identity(profile_dir);
   const fs::path file = media::path::path_from_utf8(local_path);
   if (!fs::is_regular_file(file)) {
     err = "file not found";
@@ -765,11 +826,21 @@ nlohmann::json service_files_upload(const std::string& profile_dir,
     err = uploaded.err.empty() ? "Couldn't publish file" : uploaded.err;
     return {};
   }
+  const std::string stored = uploaded.path.empty() ? remote : uploaded.path;
+  std::string owner;
+  std::string owner_err;
+  std::string for_url = stored;
+  if (make_public) {
+    pm_zitadel_oauth_read_app_user_id(owner, owner_err);
+    if (stored != "public" && stored.rfind("public/", 0) != 0)
+      for_url = remote;
+  }
+  const std::string url = pm::cms::build_filebrowser_url(session.base, uploaded.mount, for_url, owner);
   return {
       {"mount", uploaded.mount},
-      {"vfs_path", uploaded.path.empty() ? remote : uploaded.path},
+      {"vfs_path", stored},
       {"public", make_public},
-      {"url", uploaded.browser_url},
+      {"url", url},
   };
 }
 
@@ -785,6 +856,7 @@ nlohmann::json service_page_create(const std::string& profile_dir,
   pm::cms::CmsSession session;
   if (!open_session(profile_dir, session, err))
     return {};
+  ensure_account_identity(profile_dir);
   const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::system_clock::now().time_since_epoch())
                       .count();

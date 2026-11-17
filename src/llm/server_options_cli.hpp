@@ -19,7 +19,7 @@ namespace media::llm::agent::cliopt {
 struct AgentServerOptions {
     std::string host = "127.0.0.1";
     int port = 8090;
-    int concurrency = 2;
+    int concurrency = 32;
     int http_workers = 0;
     std::string serve_api_key;
     std::string preset;
