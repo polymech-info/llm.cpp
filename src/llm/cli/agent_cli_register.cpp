@@ -167,13 +167,13 @@ void pm_image_register_llm(CLI::App& app, PmImageCliState& s) {
         "local / llama: text/planner GGUF models. "
         "vlm: local VLM models (multimodal / vision / OCR) with mmproj paths. "
         "whisper: local whisper.cpp ggml models. "
-        "pixlwiz / openrouter / replicate: fetches live catalog (disk-cached; replicate 3 d, others 24 h). "
+        "tanit / pixlwiz / openrouter / replicate: fetches live catalog (disk-cached; replicate 3 d, others 24 h). "
         "Other names: shows configured default_model from app settings.");
     s.llm_info_models_cmd->add_option(
         "--provider", s.llm_info_models_provider,
-        "Provider to query: local | llama | vlm | whisper | pixlwiz | openrouter | replicate | <name from `llm info providers`>")->required(true);
+        "Provider to query: local | llama | vlm | whisper | tanit | pixlwiz | openai | openrouter | replicate | <name from `llm info providers`>")->required(true);
     s.llm_info_models_cmd->add_flag("--no-cache", s.llm_info_models_no_cache,
-        "Bypass the disk cache and force a live HTTP fetch (pixlwiz / openrouter).");
+        "Bypass the disk cache and force a live HTTP fetch (tanit / pixlwiz / openai / openrouter).");
     s.llm_info_models_cmd->add_flag("--json", s.llm_info_json, "Output JSON");
 
 #if FEATURE_HOME_LLM_TOOLS
@@ -581,9 +581,9 @@ void pm_image_register_llm(CLI::App& app, PmImageCliState& s) {
         ->group("Server");
     s.llm_agent_cmd->add_option(
         "--pair-scopes", s.ag_serve_pair_scopes,
-        "Comma list granted by --pair: chat, files, tools, video, audio. "
-        "Default: chat, files, tools. video is the remote desktop viewer. "
-        "audio is microphone and loopback capture.")
+        "Comma list granted by --pair. Required. Each name is one capability: "
+        "chat, files, tools, video, audio. video is the remote desktop viewer. "
+        "audio is microphone and loopback capture. files is this computer's shared folders.")
         ->group("Server");
     s.llm_agent_cmd->add_flag(
         "--lan-devices", s.ag_serve_lan_devices,
