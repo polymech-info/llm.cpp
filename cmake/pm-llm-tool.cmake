@@ -12,7 +12,7 @@ function(pm_add_llm_tool)
     "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src"
     "${CMAKE_SOURCE_DIR}/src"
     "${CMAKE_SOURCE_DIR}/src/core"
-    "${CMAKE_SOURCE_DIR}/src/servers/base/include"
+    "${CMAKE_SOURCE_DIR}/packages/server.cpp/src/base/include"
     "${CMAKE_BINARY_DIR}/include")
   target_link_libraries(pm-llm PRIVATE pm-commons-lib CLI11::CLI11)
   if(WIN32)

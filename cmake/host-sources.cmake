@@ -4,10 +4,10 @@
 # Paths are absolute so a caller outside the repo root resolves the same files.
 
 set(PM_LLM_SRC "${CMAKE_CURRENT_LIST_DIR}/../src/llm")
-# Desktop listener. It is not a file under packages/llm.cpp. Resolved here,
+# Desktop listener. It lives in packages/server.cpp. Resolved here,
 # at file scope: inside pm_llm_sources(), CMAKE_CURRENT_LIST_DIR is the caller.
 get_filename_component(PM_NODE_DESKTOP
-  "${CMAKE_CURRENT_LIST_DIR}/../../../src/servers/tanit-node/desktop" ABSOLUTE)
+  "${CMAKE_CURRENT_LIST_DIR}/../../server.cpp/src/tanit-node/desktop" ABSOLUTE)
 
 function(pm_llm_sources group out_var)
   set(_s "${PM_LLM_SRC}")
