@@ -205,6 +205,10 @@ std::string validate_server_options(AgentServerOptions& o)
     if (o.lan_port != 0
         && (o.lan_port < 1 || o.lan_port > 65535 || o.lan_port == o.port))
         return "--lan-port must be 1-65535 and differ from --port";
+    pm::server::ListenOptions node = node_listen_options(o);
+    if (const std::string err = pm::server::validate(node); !err.empty())
+        return err;
+    o.host = std::move(node.host);
     return {};
 }
 

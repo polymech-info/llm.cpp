@@ -4,10 +4,7 @@
 # Paths are absolute so a caller outside the repo root resolves the same files.
 
 set(PM_LLM_SRC "${CMAKE_CURRENT_LIST_DIR}/../src/llm")
-# Desktop listener. It lives in packages/server.cpp. Resolved here,
-# at file scope: inside pm_llm_sources(), CMAKE_CURRENT_LIST_DIR is the caller.
-get_filename_component(PM_NODE_DESKTOP
-  "${CMAKE_CURRENT_LIST_DIR}/../../server.cpp/src/tanit-node/desktop" ABSOLUTE)
+include("${CMAKE_CURRENT_LIST_DIR}/../../server.cpp/cmake/sources.cmake")
 
 function(pm_llm_sources group out_var)
   set(_s "${PM_LLM_SRC}")
@@ -168,20 +165,14 @@ function(pm_llm_sources group out_var)
   elseif(group STREQUAL "cli")
     # server_options_cli.cpp is not here. pm_add_llm_tool already compiles it
     # into the pm-llm executable.
+    pm_server_agent_sources(_pm_node_agent)
     set(_files
       "${_s}/cli/agent_cli_util.cpp"
       "${_s}/cli/agent_cli_voice.cpp"
       "${_s}/cli/agent_cli_batch.cpp"
       "${_s}/cli/agent_cli_run.cpp"
       "${_s}/cli/agent_cli_register.cpp"
-      "${PM_NODE_DESKTOP}/node.cpp"
-      "${PM_NODE_DESKTOP}/node_llm.cpp"
-      "${PM_NODE_DESKTOP}/node_chat.cpp"
-      "${PM_NODE_DESKTOP}/node_realtime.cpp"
-      "${PM_NODE_DESKTOP}/node_audio.cpp"
-      "${PM_NODE_DESKTOP}/node_video.cpp"
-      "${PM_NODE_DESKTOP}/node_host.cpp"
-      "${PM_NODE_DESKTOP}/node_lan.cpp")
+      ${_pm_node_agent})
   elseif(group STREQUAL "cli-server-options")
     set(_files "${_s}/server_options_cli.cpp")
   elseif(group STREQUAL "run")

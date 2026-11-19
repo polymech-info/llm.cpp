@@ -4,7 +4,7 @@
 // Tanit's HTTP daemon and pm-llm both fill AgentServerOptions and call these
 // helpers. Route registration, the turn loop, video, LAN, and IPC stay on the host.
 
-#include "pm/server/features.hpp"
+#include "pm/server/options.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -122,6 +122,26 @@ inline int resolved_http_workers(const AgentServerOptions& o)
     if (workers > 512)
         workers = 512;
     return workers;
+}
+
+/// The node-owned half of the agent listener configuration. Agent-only
+/// provider, tool, prompt, and turn-loop fields do not cross this seam.
+inline pm::server::ListenOptions node_listen_options(const AgentServerOptions& o)
+{
+    pm::server::ListenOptions out;
+    out.host = o.host;
+    out.port = o.port;
+    out.http_workers = resolved_http_workers(o);
+    out.payload_max = 500u * 1024u * 1024u;
+    out.serve_api_key = o.serve_api_key;
+    out.serve_capabilities = {"files", "audio", "video", "chat", "tools"};
+    out.lan = o.lan;
+    out.lan_port = o.lan_port;
+    out.lan_name = o.lan_name;
+    out.pair_on_start = o.pair_on_start;
+    out.features = o.features;
+    out.service = "tanit-llm-agent";
+    return out;
 }
 
 /// Trim host, fill defaults, reject a bad port or an open non-loopback bind.
