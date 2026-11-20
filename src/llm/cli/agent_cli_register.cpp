@@ -1,4 +1,5 @@
 #include "pm_image_cmd_includes.hpp"
+#include "constants_server.hpp"
 #include "json/json_utils.hpp"
 #include "string/string_utils.hpp"
 #include "pm_image_cmd_llm_agent.hpp"
@@ -538,8 +539,8 @@ void pm_image_register_llm(CLI::App& app, PmImageCliState& s) {
         ->default_val("127.0.0.1")
         ->group("Server");
     s.llm_agent_cmd->add_option("--port", s.ag_serve_port,
-        "Bind port for --serve (default 8090).")
-        ->default_val(8090)
+        "Bind port for --serve (default " + std::to_string(pm::agent_http_port()) + ").")
+        ->default_val(pm::agent_http_port())
         ->group("Server");
     s.llm_agent_cmd->add_option("--concurrency", s.ag_serve_concurrency,
         "Max concurrent agent turns for --serve (default 32).")
