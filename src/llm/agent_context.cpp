@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -593,7 +594,8 @@ void append_agent_tooling_and_context(std::ostringstream& s,
                                       bool emit_identity,
                                       bool emit_selection,
                                       bool emit_open_files,
-                                      bool emit_folder)
+                                      bool emit_folder,
+                                      bool emit_editor)
 {
     std::unordered_set<std::string> enabled_tools;
     for (const auto& t : tools) {
@@ -613,13 +615,13 @@ void append_agent_tooling_and_context(std::ostringstream& s,
     if (enabled_tools.empty()) {
         s << "No tools are available this session. Answer in text only; do not claim to read, write, inspect, "
              "edit, or enumerate local files/images unless the user provided that content in the prompt.\n\n";
-        if (!turn.selection.empty()) {
+        if (emit_selection && !turn.selection.empty()) {
             s << "The user currently has " << turn.selection.size()
               << " file(s) selected, but tool access is disabled for this turn.\n";
-        } else if (!turn.open_files.empty()) {
+        } else if (emit_open_files && !turn.open_files.empty()) {
             s << "The user currently has " << turn.open_files.size()
               << " file(s) open in viewer tabs, but tool access is disabled for this turn.\n";
-        } else if (!turn.folder_hint.empty()) {
+        } else if (emit_folder && !turn.folder_hint.empty()) {
             s << "The user is browsing folder: " << turn.folder_hint
               << "\nTool access is disabled, so treat this as passive context only.\n";
         } else {
@@ -645,7 +647,7 @@ void append_agent_tooling_and_context(std::ostringstream& s,
             s << "  [" << i << "] " << format_path_with_stats(turn.open_files[i]) << "\n";
         s << "These are files open in viewer tabs; they may differ from the current file-panel selection.\n\n";
     }
-    if (!turn.editor_path.empty() && turn.editor_line > 0) {
+    if (emit_editor && !turn.editor_path.empty() && turn.editor_line > 0) {
         s << "Editor caret: " << turn.editor_path << ':' << turn.editor_line
           << ':' << turn.editor_column;
         const bool ranged =
@@ -745,15 +747,22 @@ static std::string build_system_prompt_impl(const Turn& turn,
     // The file provides the agent identity / persona preamble; the dynamic
     // tooling section that follows always runs but skips its own "You are…"
     // intro so there is no duplication.
+    using ACF = pm::llm::AgentContextFeature;
+    const auto context_on = [&](ACF feature) {
+        return pm::llm::has_feature(turn.context_features, feature);
+    };
     const PromptFileLoad system_prompt_file = load_system_prompt_md();
-    const std::string external = render_prompt_file(system_prompt_file.content, turn);
+    const std::string external = context_on(ACF::System)
+        ? render_prompt_file(system_prompt_file.content, turn)
+        : std::string{};
 
     if (prompt_meta) {
+        const bool from_file = context_on(ACF::System) && !external.empty();
         (*prompt_meta)["system"] = {
-            {"source", external.empty() ? "builtin" : "file"},
-            {"path", system_prompt_file.path.empty()
-                ? nlohmann::json(nullptr)
-                : nlohmann::json(media::path::path_to_utf8(system_prompt_file.path))},
+            {"source", from_file ? "file" : "builtin"},
+            {"path", from_file && !system_prompt_file.path.empty()
+                ? nlohmann::json(media::path::path_to_utf8(system_prompt_file.path))
+                : nlohmann::json(nullptr)},
         };
     }
 
@@ -776,15 +785,20 @@ static std::string build_system_prompt_impl(const Turn& turn,
     if (!external.empty())
         s << external << "\n\n---\n\n";
 
-    append_runtime_environment_context(s);
+    if (context_on(ACF::Runtime))
+        append_runtime_environment_context(s);
     const auto prompt_has = [&](const char* token) {
-        return system_prompt_file.content.find(token) != std::string::npos;
+        return context_on(ACF::System)
+            && system_prompt_file.content.find(token) != std::string::npos;
     };
+    if (context_on(ACF::Location))
+        s << user_location_prompt_suffix(turn, prompt_has("${USER_LOCATION}"));
     append_agent_tooling_and_context(s, turn, tools,
         /*emit_identity=*/external.empty(),
-        /*emit_selection=*/!prompt_has("${CURRENT_SELECTION}"),
-        /*emit_open_files=*/!prompt_has("${CURRENT_OPEN_FILES}"),
-        /*emit_folder=*/!prompt_has("${FOLDER}"));
+        /*emit_selection=*/context_on(ACF::Selection) && !prompt_has("${CURRENT_SELECTION}"),
+        /*emit_open_files=*/context_on(ACF::OpenFiles) && !prompt_has("${CURRENT_OPEN_FILES}"),
+        /*emit_folder=*/context_on(ACF::Folder) && !prompt_has("${FOLDER}"),
+        /*emit_editor=*/context_on(ACF::Editor));
 
     // ── P1: planner intent-context block ─────────────────────────────────────
     // Emitted whenever the planner produced at least one intent-context field,
@@ -792,7 +806,7 @@ static std::string build_system_prompt_impl(const Turn& turn,
     // tools") — these are pure-query turns where intent is still meaningful.
     // Only skipped when fallback means "planner didn't attempt" (error /
     // disabled / realtime), detected by absence of any intent field.
-    if (turn.planner_meta.is_object() &&
+    if (context_on(ACF::Planner) && turn.planner_meta.is_object() &&
         (turn.planner_meta.contains("intent") || turn.planner_meta.contains("action") ||
          turn.planner_meta.contains("subject"))) {
         const std::string intent  = turn.planner_meta.value("intent",  std::string{});
@@ -840,7 +854,7 @@ static std::string build_system_prompt_impl(const Turn& turn,
     // When the planner (or caller) set a non-Auto TurnMode, load the matching
     // `mode-<name>.md` from the prompts directory and inject it as a behavioural
     // guidance block.  Gracefully a no-op when the file does not exist.
-    if (turn.mode != TurnMode::Auto) {
+    if (context_on(ACF::Mode) && turn.mode != TurnMode::Auto) {
         const PromptFileLoad overlay_file = detail::load_mode_overlay_md(turn.mode);
         const std::string& overlay = overlay_file.content;
         if (prompt_meta && !overlay.empty()) {
@@ -991,11 +1005,11 @@ static std::string build_system_prompt_impl(const Turn& turn,
         }
     }
 
-    if (!turn.system_extra.empty())
+    if (context_on(ACF::Extra) && !turn.system_extra.empty())
         s << "\n" << turn.system_extra << "\n";
 
     const PromptFileLoad prefs = load_user_preferences_md();
-    if (!prefs.content.empty()) {
+    if (context_on(ACF::Preferences) && !prefs.content.empty()) {
         if (prompt_meta) {
             (*prompt_meta)["user_preferences"] = {
                 {"source", "file"},
@@ -1035,6 +1049,26 @@ std::string build_system_prompt(const Turn& turn) {
         ? media::llm::path::tool_catalog_openai()
         : media::llm::path::tool_catalog_openai_excluding(turn.disabled_path_tools);
     return detail::build_system_prompt_impl(turn, tools);
+}
+
+namespace {
+
+std::mutex g_user_location_mu;
+std::string g_user_location;
+
+} // namespace
+
+void set_cached_user_location(std::string line)
+{
+    line = normalize_user_location(std::move(line));
+    std::lock_guard<std::mutex> lock(g_user_location_mu);
+    g_user_location = std::move(line);
+}
+
+std::string cached_user_location()
+{
+    std::lock_guard<std::mutex> lock(g_user_location_mu);
+    return g_user_location;
 }
 
 } // namespace media::llm::agent

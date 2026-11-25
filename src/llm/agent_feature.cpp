@@ -1278,6 +1278,11 @@ public:
             run.system_prompt         = turn.system_prompt_is_null
                 ? std::string{}
                 : detail::render_prompt_file(turn.system_prompt_override, turn);
+            if (!turn.system_prompt_is_null) {
+                const bool substituted =
+                    turn.system_prompt_override.find("${USER_LOCATION}") != std::string::npos;
+                run.system_prompt += detail::user_location_prompt_suffix(turn, substituted);
+            }
             run.system_prompt_set     = true;
             run.system_prompt_is_null = turn.system_prompt_is_null;
             run.prompt_meta["system"] = {
@@ -1537,6 +1542,11 @@ void apply_planner_tool_selection(Turn& turn, const ProviderSettings& provider)
         }
         // No file and no usable override → system stays empty; planner runs
         // without a system message (user message still carries the index + goal).
+        const bool location_substituted =
+            from_file.content.find("${USER_LOCATION}") != std::string::npos
+            || (turn.planner_prompt_override_set
+                && turn.planner_prompt_override.find("${USER_LOCATION}") != std::string::npos);
+        system += detail::user_location_prompt_suffix(turn, location_substituted);
     }
 
     // Dedicated planner provider/model overrides (settings.json `chat.planner_router` /

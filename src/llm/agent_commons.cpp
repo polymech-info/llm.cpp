@@ -654,20 +654,26 @@ bool path_is_large_text_file(std::string_view path)
 static media::commands::VariableMap build_agent_prompt_vars(const Turn& turn,
                                                              const std::string& builtin_text)
 {
+    using ACF = pm::llm::AgentContextFeature;
+    const auto context_on = [&](ACF feature) {
+        return pm::llm::has_feature(turn.context_features, feature);
+    };
     // Base: standard command_variables (CWD, YYYY, MM, DD, HH, SS,
     //       CURRENT_PATH, CURRENT_SELECTION, PATH_SEP, …).
     media::commands::VariableContext ctx;
-    ctx.cwd             = turn.folder_hint;
-    ctx.selection_paths = turn.selection;
+    ctx.cwd             = context_on(ACF::Folder) ? turn.folder_hint : std::string{};
+    ctx.selection_paths = context_on(ACF::Selection) ? turn.selection : std::vector<std::string>{};
     auto vars = media::commands::make_variable_map(ctx);
 
     // Agent-specific additions.
     vars["APP_NAME"]        = pm::brand::k_app_display_u8;
     vars["APP_ID"]          = pm::brand::k_app_id_u8;
     vars["DATETIME"]        = local_datetime_with_offset();
-    vars["FOLDER"]          = turn.folder_hint;
-    vars["SELECTION_COUNT"] = std::to_string(turn.selection.size());
-    vars["OPEN_COUNT"]      = std::to_string(turn.open_files.size());
+    vars["FOLDER"]          = context_on(ACF::Folder) ? turn.folder_hint : std::string{};
+    vars["SELECTION_COUNT"] = context_on(ACF::Selection)
+        ? std::to_string(turn.selection.size()) : "0";
+    vars["OPEN_COUNT"]      = context_on(ACF::OpenFiles)
+        ? std::to_string(turn.open_files.size()) : "0";
     vars["TASK_ID"]         = turn.task_id;
     vars["PLATFORM"]        =
 #if defined(_WIN32)
@@ -679,23 +685,29 @@ static media::commands::VariableMap build_agent_prompt_vars(const Turn& turn,
 #else
         "Linux";
 #endif
-    vars["CONNECTION_CONTEXT"] = turn.connection_context.empty()
+    if (context_on(ACF::Connection)) {
+        vars["CONNECTION_CONTEXT"] = turn.connection_context.empty()
 #if defined(__ANDROID__)
-        ? "Connection mode: phone-local. Tools act on this Android device or its app data unless a tool explicitly names a remote service."
+            ? "Connection mode: phone-local. Tools act on this Android device or its app data unless a tool explicitly names a remote service."
 #else
-        ? "Connection mode: local. Tools act on this computer unless a tool explicitly names a remote service."
+            ? "Connection mode: local. Tools act on this computer unless a tool explicitly names a remote service."
 #endif
-        : turn.connection_context;
+            : turn.connection_context;
+    } else {
+        vars["CONNECTION_CONTEXT"] = "";
+    }
 
     // Guarantee selection/path keys are always present so templates never
     // leave a literal ${...} placeholder when nothing is selected / no folder.
     // Agent prompts get size/line annotations; CLI CURRENT_SELECTION stays a path list.
-    vars["CURRENT_SELECTION"] = format_paths_with_stats(turn.selection);
+    vars["CURRENT_SELECTION"] = context_on(ACF::Selection)
+        ? format_paths_with_stats(turn.selection) : "(none)";
     if (!vars.count("CURRENT_PATH"))
-        vars["CURRENT_PATH"] = turn.folder_hint;
-    vars["CURRENT_OPEN_FILES"] = format_paths_with_stats(turn.open_files);
+        vars["CURRENT_PATH"] = context_on(ACF::Folder) ? turn.folder_hint : std::string{};
+    vars["CURRENT_OPEN_FILES"] = context_on(ACF::OpenFiles)
+        ? format_paths_with_stats(turn.open_files) : "(none)";
 
-    if (!turn.editor_path.empty() && turn.editor_line > 0) {
+    if (context_on(ACF::Editor) && !turn.editor_path.empty() && turn.editor_line > 0) {
         std::ostringstream caret;
         caret << turn.editor_path << ':' << turn.editor_line << ':' << turn.editor_column;
         const bool ranged =
@@ -710,7 +722,7 @@ static media::commands::VariableMap build_agent_prompt_vars(const Turn& turn,
     } else {
         vars["CURRENT_CURSOR"] = "(none)";
     }
-    if (!turn.editor_selected_text.empty()) {
+    if (context_on(ACF::Editor) && !turn.editor_selected_text.empty()) {
         vars["CURRENT_INNER_SELECTION"] = media::str_san::utf8_safe_ellipsize(
             turn.editor_selected_text, 400);
         vars["INNER_SELECTION_CHARS"] = std::to_string(turn.editor_selected_text.size());
@@ -721,6 +733,14 @@ static media::commands::VariableMap build_agent_prompt_vars(const Turn& turn,
 
     if (!builtin_text.empty())
         vars["builtin"] = builtin_text;
+
+    std::string user_location;
+    if (context_on(ACF::Location)) {
+        user_location = turn.user_location.empty()
+            ? cached_user_location()
+            : turn.user_location;
+    }
+    vars["USER_LOCATION"] = user_location.empty() ? "(unknown)" : user_location;
 
     append_security_consent_prompt_vars(vars, turn.user_prompt);
 
@@ -734,6 +754,21 @@ std::string render_prompt_file(const std::string& raw,
     if (raw.empty()) return {};
     const auto vars = build_agent_prompt_vars(turn, builtin_text);
     return media::commands::resolve_variables(raw, vars);
+}
+
+std::string user_location_prompt_suffix(const Turn& turn, bool already_substituted)
+{
+    if (!pm::llm::has_feature(turn.context_features, pm::llm::AgentContextFeature::Location))
+        return {};
+    const std::string user_location = turn.user_location.empty()
+        ? cached_user_location()
+        : turn.user_location;
+    if (already_substituted || user_location.empty())
+        return {};
+    return "\nUser location (approximate, may be cached): "
+        + user_location
+        + ". Use it when the user says \"near me\" or \"here\". "
+        + "An IP estimate is not a street address. A line that starts with GPS is the phone's own fix.\n";
 }
 
 // ── Date / time ───────────────────────────────────────────────────────────────

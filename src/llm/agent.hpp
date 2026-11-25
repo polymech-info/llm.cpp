@@ -88,6 +88,11 @@ struct Turn {
     /// Rendered as ${CONNECTION_CONTEXT} in host-specific prompts. Describes
     /// where tools execute (for example phone-local vs paired desktop LAN).
     std::string              connection_context;
+    /// Approximate place from the caller's network address, already one line
+    /// ("Paris, France (48.85, 2.35)"). Empty when unknown. Injected into the
+    /// system and planner prompts as ${USER_LOCATION}, or appended when the
+    /// prompt file does not name that token.
+    std::string              user_location;
     /// When true with a non-empty folder_hint, path tools (FS / search / pictures /
     /// service) hard-deny any path outside that folder (`--fs-jail` / serve hosts).
     bool                     fs_jail = false;
@@ -286,7 +291,45 @@ struct Turn {
     double      context_reduction_ratio     = pm::llm::k_context_reduction_ratio;
     /// Relevance objective for text reduction. Empty = fall back to user_prompt.
     std::string context_reduction_objective;
+
+    /// Which session facts are written into the system prompt. Default is
+    /// every block (system file, location, selection, folder, and the rest).
+    /// Clear a bit to omit that block for this turn.
+    pm::llm::AgentContextFeatures context_features =
+        pm::llm::k_default_agent_context_features;
 };
+
+/// Collapse a location hint to one short line. Empty input stays empty.
+/// Inline so every host that sets `Turn::user_location` can sanitize it
+/// without linking the chat plugin.
+inline std::string normalize_user_location(std::string line)
+{
+    std::string out;
+    out.reserve(line.size() < 180 ? line.size() : 180);
+    bool space = false;
+    for (unsigned char c : line) {
+        if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
+            space = !out.empty();
+            continue;
+        }
+        if (c < 0x20)
+            continue;
+        if (space) {
+            out.push_back(' ');
+            space = false;
+        }
+        out.push_back(static_cast<char>(c));
+        if (out.size() >= 180)
+            break;
+    }
+    return out;
+}
+
+/// Process-wide hint for hosts that build turns outside the UI request
+/// (scheduled ticks). A desktop server must not call this with a client's
+/// location; put that on `Turn::user_location` only.
+void set_cached_user_location(std::string line);
+std::string cached_user_location();
 
 /// Which API endpoint/transport the agent uses to talk to the LLM.
 /// ChatCompletion: POST /chat/completions — OpenAI-compatible, broad router support.

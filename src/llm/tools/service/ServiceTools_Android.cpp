@@ -9,6 +9,7 @@
 
 #include "cms/cms_host.hpp"
 #include "cms/pm_cms_ai_gateway.hpp"
+#include "cms/pm_cms_detail.hpp"
 #include "cms/pm_cms_download.hpp"
 #include "cms/pm_cms_identity.hpp"
 #include "cms/pm_cms_list.hpp"
@@ -294,6 +295,10 @@ bool pull_into(const pm::cms::CmsSession& session,
                std::uint64_t& bytes,
                std::string& err)
 {
+  // Global gate: Android curl SIGSEGV'd under concurrent easy_perform (list thumbs
+  // + open + SAF). Per-dest lock alone is not enough across different files.
+  static std::mutex g_vfs_download_gate;
+  std::lock_guard<std::mutex> download_hold(g_vfs_download_gate);
   const CachedFileLock busy(dest);
   std::error_code ec;
   fs::create_directories(dest.parent_path(), ec);
@@ -307,7 +312,7 @@ bool pull_into(const pm::cms::CmsSession& session,
   options.overwrite = true;
   options.skip_existing = false;
   options.keep_partial = false;
-  options.retries = 0;
+  options.retries = 2; // brief Wi‑Fi blip / server timeout
   options.timeout_ms = 120'000;
   options.connect_timeout_ms = 5'000;
   options.expected_size = expected_size;
@@ -879,6 +884,329 @@ nlohmann::json service_page_create(const std::string& profile_dir,
       {"slug", created.slug},
       {"url", created.url},
   };
+}
+
+namespace {
+
+std::string session_user_id(const std::string& profile_dir, pm::cms::CmsSession& session, std::string& err)
+{
+  ensure_account_identity(profile_dir);
+  std::string user;
+  std::string id_err;
+  if (pm_zitadel_oauth_read_app_user_id(user, id_err) && !user.empty())
+    return user;
+  user = pm::cms::resolve_current_app_user_id_or_default();
+  if (user.empty()) {
+    err = id_err.empty() ? "signed-in account has no app_user_id" : id_err;
+    return {};
+  }
+  (void)session;
+  return user;
+}
+
+nlohmann::json list_items_payload(const pm::cms::CmsListResult& listed)
+{
+  nlohmann::json items = nlohmann::json::array();
+  if (listed.json.is_array())
+    items = listed.json;
+  else if (listed.json.is_object()) {
+    if (listed.json.contains("data") && listed.json["data"].is_array())
+      items = listed.json["data"];
+    else if (listed.json.contains("items") && listed.json["items"].is_array())
+      items = listed.json["items"];
+    else if (listed.json.contains("pages") && listed.json["pages"].is_array())
+      items = listed.json["pages"];
+    else if (listed.json.contains("posts") && listed.json["posts"].is_array())
+      items = listed.json["posts"];
+  }
+  const std::size_t count = items.is_array() ? items.size() : 0;
+  return {
+      {"ok", true},
+      {"items", std::move(items)},
+      {"count", count},
+  };
+}
+
+} // namespace
+
+nlohmann::json service_post_add_picture(const std::string& profile_dir,
+                                        const std::string& post_id,
+                                        const std::string& image_path,
+                                        std::string& err)
+{
+  if (post_id.empty()) {
+    err = "post id is required";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  ensure_account_identity(profile_dir);
+  const fs::path file(image_path);
+  if (!fs::is_regular_file(file)) {
+    err = "image file not found";
+    return {};
+  }
+  const auto detail = pm::cms::get_post_detail_by_id(session.base, session.bearer, post_id);
+  int start = 0;
+  if (detail.ok)
+    start = pm::cms::next_post_picture_position(detail.json);
+  const auto added =
+      pm::cms::add_pictures_to_post(session.base, session.bearer, post_id, {file}, start);
+  if (!added.ok) {
+    err = added.err.empty() ? "Couldn't add picture to post" : added.err;
+    return {};
+  }
+  const std::string url =
+      pm::cms::build_post_compact_view_url(session.base, added.post_id, added.picture_ids);
+  const std::string picture = added.picture_ids.empty() ? std::string{} : added.picture_ids.front();
+  return {
+      {"post_id", added.post_id},
+      {"picture_id", picture},
+      {"url", url},
+  };
+}
+
+nlohmann::json service_posts_list(const std::string& profile_dir, std::string& err)
+{
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const std::string user = session_user_id(profile_dir, session, err);
+  if (user.empty())
+    return {};
+  const auto listed = pm::cms::list_user_posts(session.base, session.bearer, user);
+  if (!listed.ok) {
+    err = listed.err.empty() ? "Couldn't list posts" : listed.err;
+    return {};
+  }
+  return list_items_payload(listed);
+}
+
+nlohmann::json service_post_get(const std::string& profile_dir, const std::string& post_id, std::string& err)
+{
+  if (post_id.empty()) {
+    err = "post id is required";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const auto detail = pm::cms::get_post_detail_by_id(session.base, session.bearer, post_id);
+  if (!detail.ok) {
+    err = detail.err.empty() ? "Couldn't open post" : detail.err;
+    return {};
+  }
+  return detail.json.is_null() ? nlohmann::json::object() : detail.json;
+}
+
+nlohmann::json service_post_remove(const std::string& profile_dir, const std::string& post_id, std::string& err)
+{
+  if (post_id.empty()) {
+    err = "post id is required";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const auto gone = pm::cms::delete_post(session.base, session.bearer, post_id);
+  if (!gone.ok) {
+    err = gone.err.empty() ? "Couldn't delete post" : gone.err;
+    return {};
+  }
+  return {{"ok", true}, {"post_id", post_id}};
+}
+
+nlohmann::json service_post_set_visibility(const std::string& profile_dir, const std::string& post_id,
+                                           const std::string& visibility, std::string& err)
+{
+  if (post_id.empty()) {
+    err = "post id is required";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const auto updated = pm::cms::update_post_visibility(session.base, session.bearer, post_id, visibility);
+  if (!updated.ok) {
+    err = updated.err.empty() ? "Couldn't update post visibility" : updated.err;
+    return {};
+  }
+  return {{"ok", true}, {"post_id", post_id}, {"visibility", visibility}};
+}
+
+nlohmann::json service_picture_remove(const std::string& profile_dir, const std::string& picture_id,
+                                      std::string& err)
+{
+  if (picture_id.empty()) {
+    err = "picture id is required";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const auto gone = pm::cms::delete_picture(session.base, session.bearer, picture_id);
+  if (!gone.ok) {
+    err = gone.err.empty() ? "Couldn't delete picture" : gone.err;
+    return {};
+  }
+  return {{"ok", true}, {"picture_id", picture_id}};
+}
+
+nlohmann::json service_picture_set_visible(const std::string& profile_dir, const std::string& picture_id,
+                                           bool visible, std::string& err)
+{
+  if (picture_id.empty()) {
+    err = "picture id is required";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  nlohmann::json body;
+  body["visible"] = visible;
+  const auto updated = pm::cms::update_picture_json(session.base, session.bearer, picture_id, body);
+  if (!updated.ok) {
+    err = updated.err.empty() ? "Couldn't update picture" : updated.err;
+    return {};
+  }
+  return {{"ok", true}, {"picture_id", picture_id}, {"visible", visible}};
+}
+
+nlohmann::json service_pages_list(const std::string& profile_dir, std::string& err)
+{
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const std::string user = session_user_id(profile_dir, session, err);
+  if (user.empty())
+    return {};
+  const auto listed = pm::cms::list_user_pages(session.base, session.bearer, user);
+  if (!listed.ok) {
+    err = listed.err.empty() ? "Couldn't list pages" : listed.err;
+    return {};
+  }
+  return list_items_payload(listed);
+}
+
+nlohmann::json service_page_get(const std::string& profile_dir, const std::string& page_id, std::string& err)
+{
+  if (page_id.empty()) {
+    err = "page id is required";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const auto detail = pm::cms::get_page_detail_by_id(session.base, session.bearer, page_id);
+  if (!detail.ok) {
+    err = detail.err.empty() ? "Couldn't open page" : detail.err;
+    return {};
+  }
+  nlohmann::json out = detail.json.is_null() ? nlohmann::json::object() : detail.json;
+  nlohmann::json* page = nullptr;
+  if (out.contains("page") && out["page"].is_object())
+    page = &out["page"];
+  else if (out.is_object())
+    page = &out;
+  if (page != nullptr) {
+    const std::string slug = page->value("slug", std::string());
+    std::string ident;
+    std::string ignore;
+    if (!pm_zitadel_oauth_read_app_username(ident, ignore) || ident.empty()) {
+      ident = page->value("user_id", page->value("owner_id", std::string()));
+    }
+    if (!slug.empty() && !ident.empty()) {
+      const std::string url = pm::cms::trim_trailing_slash(session.base) + "/user/"
+                              + pm::cms::percent_encode_path_segment(ident) + "/pages/"
+                              + pm::cms::percent_encode_path_segment(slug);
+      (*page)["url"] = url;
+      out["url"] = url;
+    }
+  }
+  return out;
+}
+
+nlohmann::json service_page_remove(const std::string& profile_dir, const std::string& page_id, std::string& err)
+{
+  if (page_id.empty()) {
+    err = "page id is required";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const auto gone = pm::cms::delete_page(session.base, session.bearer, page_id);
+  if (!gone.ok) {
+    err = gone.err.empty() ? "Couldn't delete page" : gone.err;
+    return {};
+  }
+  return {{"ok", true}, {"page_id", page_id}};
+}
+
+nlohmann::json service_page_set_visibility(const std::string& profile_dir, const std::string& page_id,
+                                           bool is_public, bool visible, std::string& err)
+{
+  if (page_id.empty()) {
+    err = "page id is required";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  const auto updated =
+      pm::cms::update_page_visibility(session.base, session.bearer, page_id, is_public, visible);
+  if (!updated.ok) {
+    err = updated.err.empty() ? "Couldn't update page visibility" : updated.err;
+    return {};
+  }
+  return {{"ok", true}, {"page_id", page_id}, {"is_public", is_public}, {"visible", visible}};
+}
+
+nlohmann::json service_page_add_photo(const std::string& profile_dir,
+                                      const std::string& page_id,
+                                      const std::string& image_path,
+                                      std::string& err)
+{
+  if (page_id.empty()) {
+    err = "page id is required";
+    return {};
+  }
+  pm::cms::CmsSession session;
+  if (!open_session(profile_dir, session, err))
+    return {};
+  ensure_account_identity(profile_dir);
+  const fs::path file(image_path);
+  if (!fs::is_regular_file(file)) {
+    err = "image file not found";
+    return {};
+  }
+  const auto added = pm::cms::add_photo_card_to_page(session.base, session.bearer, page_id, file);
+  if (!added.ok) {
+    err = added.err.empty() ? "Couldn't add photo to page" : added.err;
+    return {};
+  }
+  return {
+      {"page_id", added.page_id},
+      {"picture_id", added.picture_id},
+      {"url", added.url},
+  };
+}
+
+nlohmann::json service_page_layout_append_photo_card(const std::string& content_json,
+                                                     const std::string& picture_id,
+                                                     std::string& err)
+{
+  nlohmann::json content;
+  try {
+    content = nlohmann::json::parse(content_json.empty() ? "{}" : content_json);
+  } catch (const std::exception& e) {
+    err = std::string("invalid page content JSON: ") + e.what();
+    return {};
+  }
+  if (!pm::cms::append_photo_card_to_page_content(content, picture_id, err))
+    return {};
+  return {{"ok", true}, {"content", std::move(content)}};
 }
 
 } // namespace pm::android

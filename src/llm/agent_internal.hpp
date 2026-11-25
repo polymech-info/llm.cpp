@@ -85,7 +85,7 @@ std::string load_mode_overlay_md_if_present(TurnMode mode);
 /// agent-specific ones: APP_NAME, APP_ID, PLATFORM, DATETIME, FOLDER,
 /// SELECTION_COUNT, CURRENT_SELECTION, OPEN_COUNT, CURRENT_OPEN_FILES,
 /// CURRENT_CURSOR, CURRENT_INNER_SELECTION, INNER_SELECTION_CHARS,
-/// TASK_ID, and optionally `builtin` for planner wrapping.
+/// USER_LOCATION, TASK_ID, and optionally `builtin` for planner wrapping.
 /// Unknown placeholders are left intact.
 ///
 /// CURRENT_SELECTION / CURRENT_OPEN_FILES are annotated with size / line
@@ -107,6 +107,10 @@ bool path_is_existing_text_file(std::string_view path);
 std::string render_prompt_file(const std::string& raw,
                                const Turn& turn,
                                const std::string& builtin_text = {});
+
+/// Extra system/planner paragraph when `turn.user_location` is set and
+/// `already_substituted` is false (the prompt file already names ${USER_LOCATION}).
+std::string user_location_prompt_suffix(const Turn& turn, bool already_substituted);
 
 // ── Date / time ───────────────────────────────────────────────────────────────
 

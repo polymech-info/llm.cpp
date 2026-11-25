@@ -17,6 +17,46 @@
 #define FEATURE_LLM_RUN_STRICT 1
 #endif
 
+// Agent prompt context. CMake LLM_CONTEXT_* (presets + android-chat-features).
+// Unset means on, so a target that does not receive the defines still injects
+// every block.
+#ifndef LLM_CONTEXT_SYSTEM
+#define LLM_CONTEXT_SYSTEM 1
+#endif
+#ifndef LLM_CONTEXT_LOCATION
+#define LLM_CONTEXT_LOCATION 1
+#endif
+#ifndef LLM_CONTEXT_SELECTION
+#define LLM_CONTEXT_SELECTION 1
+#endif
+#ifndef LLM_CONTEXT_OPEN_FILES
+#define LLM_CONTEXT_OPEN_FILES 1
+#endif
+#ifndef LLM_CONTEXT_FOLDER
+#define LLM_CONTEXT_FOLDER 1
+#endif
+#ifndef LLM_CONTEXT_EDITOR
+#define LLM_CONTEXT_EDITOR 1
+#endif
+#ifndef LLM_CONTEXT_RUNTIME
+#define LLM_CONTEXT_RUNTIME 1
+#endif
+#ifndef LLM_CONTEXT_CONNECTION
+#define LLM_CONTEXT_CONNECTION 1
+#endif
+#ifndef LLM_CONTEXT_PLANNER
+#define LLM_CONTEXT_PLANNER 1
+#endif
+#ifndef LLM_CONTEXT_MODE
+#define LLM_CONTEXT_MODE 1
+#endif
+#ifndef LLM_CONTEXT_PREFERENCES
+#define LLM_CONTEXT_PREFERENCES 1
+#endif
+#ifndef LLM_CONTEXT_EXTRA
+#define LLM_CONTEXT_EXTRA 1
+#endif
+
 namespace pm::llm {
 
 // ── Filesystem guard policy ───────────────────────────────────────────────────
@@ -204,6 +244,73 @@ inline constexpr StructuredMemoryFeatures k_default_structured_memory_features =
     | StructuredMemoryFeature::IndexMemoryEntries
     | StructuredMemoryFeature::HybridRecallSearch
     | StructuredMemoryFeature::InjectPendingRecall;
+
+// ── Agent prompt context — which session facts enter the system prompt ───────
+//
+// A Turn carries this mask. The compiled default is the LLM_CONTEXT_* bits
+// (CMake, all on). Clear a bit on the Turn to drop that block (and its ${VAR}).
+//
+//   System        system-prompt.md (persona, tool guidance, ${…} template)
+//   Location      ${USER_LOCATION} and the location paragraph
+//   Selection     selected files (${CURRENT_SELECTION})
+//   OpenFiles     viewer tabs (${CURRENT_OPEN_FILES})
+//   Folder        working folder (${FOLDER})
+//   Editor        caret and inner selection
+//   Runtime       host OS / application block
+//   Connection    ${CONNECTION_CONTEXT} (phone-local vs paired desktop)
+//   Planner       planner intent / action / subject for this turn
+//   Mode          mode-<name>.md behavioral overlay
+//   Preferences   user-preferences.md
+//   Extra         caller system_extra (workflow inject lands here)
+//
+enum class AgentContextFeature : std::uint32_t {
+    None        = 0,
+    System      = 1u << 0,
+    Location    = 1u << 1,
+    Selection   = 1u << 2,
+    OpenFiles   = 1u << 3,
+    Folder      = 1u << 4,
+    Editor      = 1u << 5,
+    Runtime     = 1u << 6,
+    Connection  = 1u << 7,
+    Planner     = 1u << 8,
+    Mode        = 1u << 9,
+    Preferences = 1u << 10,
+    Extra       = 1u << 11,
+    All         = 0xFFFFFFFFu,
+};
+
+using AgentContextFeatures = std::uint32_t;
+
+constexpr AgentContextFeatures operator|(AgentContextFeature a, AgentContextFeature b) {
+    return static_cast<AgentContextFeatures>(a) | static_cast<AgentContextFeatures>(b);
+}
+constexpr AgentContextFeatures operator|(AgentContextFeatures a, AgentContextFeature b) {
+    return a | static_cast<AgentContextFeatures>(b);
+}
+
+constexpr bool has_feature(AgentContextFeatures mask, AgentContextFeature f) {
+    return (mask & static_cast<AgentContextFeatures>(f)) != 0;
+}
+
+constexpr AgentContextFeatures llm_context_bit(bool on, AgentContextFeature bit) {
+    return on ? static_cast<AgentContextFeatures>(bit) : AgentContextFeatures{0};
+}
+
+/// Compiled default from LLM_CONTEXT_* . All on unless a preset clears one.
+inline constexpr AgentContextFeatures k_default_agent_context_features =
+      llm_context_bit(LLM_CONTEXT_SYSTEM != 0, AgentContextFeature::System)
+    | llm_context_bit(LLM_CONTEXT_LOCATION != 0, AgentContextFeature::Location)
+    | llm_context_bit(LLM_CONTEXT_SELECTION != 0, AgentContextFeature::Selection)
+    | llm_context_bit(LLM_CONTEXT_OPEN_FILES != 0, AgentContextFeature::OpenFiles)
+    | llm_context_bit(LLM_CONTEXT_FOLDER != 0, AgentContextFeature::Folder)
+    | llm_context_bit(LLM_CONTEXT_EDITOR != 0, AgentContextFeature::Editor)
+    | llm_context_bit(LLM_CONTEXT_RUNTIME != 0, AgentContextFeature::Runtime)
+    | llm_context_bit(LLM_CONTEXT_CONNECTION != 0, AgentContextFeature::Connection)
+    | llm_context_bit(LLM_CONTEXT_PLANNER != 0, AgentContextFeature::Planner)
+    | llm_context_bit(LLM_CONTEXT_MODE != 0, AgentContextFeature::Mode)
+    | llm_context_bit(LLM_CONTEXT_PREFERENCES != 0, AgentContextFeature::Preferences)
+    | llm_context_bit(LLM_CONTEXT_EXTRA != 0, AgentContextFeature::Extra);
 
 // ── Structured session memory — size caps ────────────────────────────────────
 
