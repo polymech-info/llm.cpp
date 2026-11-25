@@ -1328,30 +1328,6 @@ nlohmann::json session_persist_artifacts_from_result(const std::string& session_
             {"active", true},
         };
 
-        // Dedicated rule for terse follow-ups ("now as X", "save it as Y",
-        // "convert to Z", "as <ext>"). Without this the model frequently
-        // asks a clarifying question instead of operating on the newest
-        // session item, even though the previous rule says not to.
-        rules["rule_terse_followup_acts_on_latest"] = {
-            {"id", "rule_terse_followup_acts_on_latest"},
-            {"text",
-             "When the user's prompt is a brief modifier with no explicit subject "
-             "(e.g. 'now as <ext>', 'save it as <name>', 'convert to <fmt>', "
-             "'as <type>', 'and now <ext>', 'animate this', 'make a video of that'), "
-             "treat it as a transformation of the newest session item (newest first). "
-             "Act with the available tools immediately — do NOT ask the user for "
-             "clarification, content, source paths, or confirmation. The newest item "
-             "IS the source. For animate / video, pass that image path as create_video "
-             "start_frame (and a second still as last_frame only when clearly wanted)."},
-            {"trigger", "terse follow-up modifier with no explicit subject or content"},
-            {"action", "transform newest session item using the requested format/target without asking"},
-            {"scope", "session"},
-            {"priority", "hard"},
-            {"source_turn_id", session_id},
-            {"created_at", now},
-            {"active", true},
-        };
-
         // Filename-with-extension in the user prompt is a strong write signal.
         // Without this, models sometimes emit the content inline (in chat)
         // instead of calling write_file, especially for terse follow-ups
@@ -1925,7 +1901,7 @@ struct FeatureName {
 };
 
 // Keep in sync with pm::llm::StructuredMemoryFeature in llm_constants.hpp.
-constexpr std::array<FeatureName, 17> k_feature_table = {{
+constexpr std::array<FeatureName, 19> k_feature_table = {{
     {"CaptureWriteArtifacts",  SMF::CaptureWriteArtifacts},
     {"CaptureMcpObservations", SMF::CaptureMcpObservations},
     {"SynthesizeRules",        SMF::SynthesizeRules},
@@ -1943,6 +1919,8 @@ constexpr std::array<FeatureName, 17> k_feature_table = {{
     {"IndexMemoryEntries",     SMF::IndexMemoryEntries},
     {"HybridRecallSearch",     SMF::HybridRecallSearch},
     {"InjectPendingRecall",    SMF::InjectPendingRecall},
+    {"InjectRecentMessages",   SMF::InjectRecentMessages},
+    {"InjectStoredFacts",      SMF::InjectStoredFacts},
 }};
 
 /// Lowercase + strip underscores. "Inject_Items" / "INJECTITEMS" / "inject_items"

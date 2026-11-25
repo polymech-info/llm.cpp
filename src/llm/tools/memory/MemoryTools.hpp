@@ -3,12 +3,12 @@
 // `memory_read` / `memory_write` / `memory_append_event` / `memory_find` agent tools.
 //
 // memory_read / memory_write route through:
-//   * task_store_* (in-memory) for real scheduled tasks
-//   * one global signed long-term document `default_memory.doc`
-//     for regular chat sessions and CLI runs
+//   * the current session when task_id and scope are omitted
+//   * task_store_* when task_id names a scheduled task
+//   * default_memory.doc only when scope is "global"
 //
-// memory_find searches default long-term memory and optionally persisted
-// past chat sessions.
+// memory_find searches the current session by default. searchPastChats
+// adds other sessions. Global facts stay in the candidate pool.
 #pragma once
 
 #include "llm/tools/commons/PathToolCommons.hpp"

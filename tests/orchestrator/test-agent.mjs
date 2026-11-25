@@ -932,8 +932,8 @@ const CASES = {
     id: 'case-memory-tools',
     cwdOffset: 'case-memory-tools',
     goal:
-      'Verify memory_write / memory_read / memory_find end-to-end via global ' +
-      'default_memory.doc persistence.',
+      'Verify memory_write / memory_read / memory_find on one session. ' +
+      'Omitted scope stays in that session.',
     options: {
       noPreset:  true,
       noPlanner: true,
@@ -1005,7 +1005,7 @@ const CASES = {
     cwdOffset: 'case-memory-tools-live',
     goal:
       'Agent stores a fact with memory_write in round 1, then recalls it with ' +
-      'memory_read in round 2. Validates default_memory.doc round-trip.',
+      'memory_read in round 2. Omitted scope stays in that chat.',
     options: {
       noPreset:    true,
       agent:       ['--multi-turn'],
@@ -1017,7 +1017,7 @@ const CASES = {
         index: 1,
         name: 'write fact via memory_write',
         prompt:
-          'Use the memory_write tool to store exactly: {"codename":"Nighthawk","phase":2}. ' +
+          'Use memory_write with no scope and no task_id to store exactly: {"codename":"Nighthawk","phase":2}. ' +
           'After the tool succeeds reply: MEMORY_WRITTEN',
       },
       {
@@ -1057,7 +1057,7 @@ const CASES = {
               tool_calls: [{
                 id: 'tc_xw1',
                 name: 'memory_write',
-                arguments: { state: { secret_token: 'CrossSession42' } },
+                arguments: { scope: 'global', state: { secret_token: 'CrossSession42' } },
               }],
             },
             { text: 'CROSS_WRITTEN secret=CrossSession42' },
@@ -1270,15 +1270,15 @@ const CASES = {
         sessionSuffix: '-a',
         name: 'session A — write secret',
         prompt:
-          'Use memory_write to store exactly: {"secret_token":"CrossSession42"}. ' +
-          'After the tool succeeds reply: CROSS_WRITTEN',
+          'Use memory_write with scope "global" and no task_id to store this hometown fact exactly: {"hometown":"LisbonHarbor"}. ' +
+          'It is not a password, token, or credential. After the tool succeeds reply: CROSS_WRITTEN',
       },
       {
         index: 2,
         sessionSuffix: '-b',
         name: 'session B — find across sessions',
         prompt:
-          'Use memory_find with searchPastChats=true and query "CrossSession42" to search ' +
+          'Use memory_find with searchPastChats=true and query "LisbonHarbor" to search ' +
           'past chat sessions. Reply: CROSS_FOUND count=<number of matches>',
       },
     ],
@@ -1775,6 +1775,10 @@ function verifyMemoryToolsLiveBehavior(testCase, caseSummary) {
     writeResult?.saved?.codename === 'Nighthawk',
     `${testCase.id}: round 1 memory_write saved codename=Nighthawk (got ${JSON.stringify(writeResult?.saved?.codename)})`,
   );
+  assertHarness(
+    writeResult?.source === 'session',
+    `${testCase.id}: omitted scope stays in the session (source=${writeResult?.source})`,
+  );
   const r1Final = readJson(r1.bundlePath)?.communication?.main_agent?.final_text || '';
   assertHarness(
     /MEMORY_WRITTEN/i.test(r1Final),
@@ -1853,6 +1857,10 @@ function verifyMemoryCrossSessionLiveBehavior(testCase, caseSummary) {
   );
   const writeResult = toolResultEnvelope(r1.bundlePath, 'memory_write');
   assertHarness(writeResult?.ok === true, `${testCase.id}: session A memory_write ok=true`);
+  assertHarness(
+    writeResult?.source === 'default_memory' && writeResult?.scope === 'global',
+    `${testCase.id}: scope=global writes persistent memory (source=${writeResult?.source} scope=${writeResult?.scope})`,
+  );
   const r1Final = readJson(r1.bundlePath)?.communication?.main_agent?.final_text || '';
   assertHarness(/CROSS_WRITTEN/i.test(r1Final), `${testCase.id}: session A replied CROSS_WRITTEN`);
 
@@ -1870,8 +1878,8 @@ function verifyMemoryCrossSessionLiveBehavior(testCase, caseSummary) {
   );
   const items = Array.isArray(findResult?.items) ? findResult.items : [];
   assertHarness(
-    items.some((it) => JSON.stringify(it).includes('CrossSession42')),
-    `${testCase.id}: memory_find results include CrossSession42`,
+    items.some((it) => JSON.stringify(it).includes('LisbonHarbor')),
+    `${testCase.id}: memory_find results include LisbonHarbor`,
   );
   const r2Final = readJson(r2.bundlePath)?.communication?.main_agent?.final_text || '';
   assertHarness(/CROSS_FOUND/i.test(r2Final), `${testCase.id}: session B replied CROSS_FOUND`);

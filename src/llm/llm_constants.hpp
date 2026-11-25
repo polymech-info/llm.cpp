@@ -205,8 +205,13 @@ enum class StructuredMemoryFeature : std::uint32_t {
     /// After each turn, BM25 (+ dense when available) + RRF; overlap-suppress vs
     /// recent Session Items; write pending + emit MemoryUpdate.recall telemetry.
     HybridRecallSearch     = 1u << 15,
-    /// on_prepare: inject pending recall block once (turn N scores → turn N+1 inject).
+    /// on_prepare: rank the current user request and inject the block on this turn.
     InjectPendingRecall    = 1u << 16,
+    /// Hydrate the last few completed turns as native user/assistant messages.
+    /// Independent of InjectItems. ReplayTranscript stays off.
+    InjectRecentMessages   = 1u << 17,
+    /// Paste explicit memory_write facts (the non-item keys) into the prompt.
+    InjectStoredFacts      = 1u << 18,
     All                    = 0xFFFFFFFFu,
 };
 
@@ -243,7 +248,9 @@ inline constexpr StructuredMemoryFeatures k_default_structured_memory_features =
     | StructuredMemoryFeature::CaptureSelfCheck
     | StructuredMemoryFeature::IndexMemoryEntries
     | StructuredMemoryFeature::HybridRecallSearch
-    | StructuredMemoryFeature::InjectPendingRecall;
+    | StructuredMemoryFeature::InjectPendingRecall
+    | StructuredMemoryFeature::InjectRecentMessages
+    | StructuredMemoryFeature::InjectStoredFacts;
 
 // ── Agent prompt context — which session facts enter the system prompt ───────
 //
@@ -344,8 +351,47 @@ inline constexpr std::size_t k_recent_turns_asst_chars    = k_recent_turns_line_
 inline constexpr std::size_t k_recent_turns_inject_chars  = 2200;
 inline constexpr std::size_t k_recent_turns_hint_calls    = 2;
 
+/// Completed pairs copied into the message list as user/assistant roles.
+/// Byte budget stands in for a shared token budget (~4 bytes/token): about
+/// 1.5k tokens, inside the standard-local band. The previous reply may use
+/// up to k_recent_messages_prev_reply_chars of that budget.
+inline constexpr std::size_t k_recent_messages_max_pairs = 4;
+inline constexpr std::size_t k_recent_messages_chars = 6000;
+inline constexpr std::size_t k_recent_messages_prev_reply_chars = 4000;
+
 /// Total UTF-8 chars injected into the agent system prompt for "Session Rules".
 inline constexpr std::size_t k_session_rules_inject_chars = 1500;
+
+/// One untrusted field written into the prompt (path, summary, rule, note).
+/// Byte length, cut on a UTF-8 boundary. The renderer also flattens newlines
+/// so a stored value cannot open a new prompt section.
+inline constexpr std::size_t k_prompt_field_chars = 240;
+
+/// Selected / open paths listed before the remainder is a count only.
+inline constexpr std::size_t k_prompt_path_list_max = 32;
+
+/// JSON blob pasted into the prompt: scheduled memory, task events,
+/// unstructured stored facts. The tree is clipped before it is dumped.
+inline constexpr std::size_t k_prompt_json_inject_chars = 2000;
+
+/// Newest scheduled-task events copied into one tick. Older events stay
+/// in the store.
+inline constexpr std::size_t k_scheduled_events_inject_max = 8;
+
+/// Caller `system_extra` (Agent.md, skill catalog, workflow, browser).
+/// Agent.md is already clipped near `k_run_output_inline_max_bytes`.
+inline constexpr std::size_t k_system_extra_inject_chars = 32u * 1024u;
+
+/// `system-prompt.md` after substitution. Shipped files are under 12 KiB.
+inline constexpr std::size_t k_system_prompt_file_chars = 16u * 1024u;
+
+/// Mode overlay and `user-preferences.md`.
+inline constexpr std::size_t k_prompt_overlay_chars = 8u * 1024u;
+
+/// Last-resort cap on the assembled system prompt. The section budgets
+/// above are the real limits; this stops a missed path from growing
+/// without a bound. It sits above the sum of those budgets.
+inline constexpr std::size_t k_system_prompt_max_chars = 160u * 1024u;
 
 /// Soft cap for the MemoryUpdate event payload `patch` field in agent logs.
 /// When exceeded, the log serializer keeps the counts + id digests and drops

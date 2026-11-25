@@ -6,6 +6,8 @@ including all improvements shipped as part of the SuperClaude-inspired refactor
 analysis that motivated these changes.
 
 Related docs:
+- [agent-context.md](agent-context.md) — multi-turn wire, the three prompts, eviction
+- [agent-memory-next.md](agent-memory-next.md) — recall roadmap
 - [llm-agent-planner.md](llm-agent-planner.md)
 - [llm-agent-factory.md](llm-agent-factory.md)
 - [llm-agent-memory-overview.md](llm-agent-memory-overview.md)
@@ -18,16 +20,29 @@ Related docs:
 implements `IAgentFeature` and declares its `FeaturePhase` (P8).
 
 ```
+EmbedInference      Scope(10)   — lazy embedding backend (when built)
 PathScopeFeature    Scope(10)   — pin base path + blocklist (RAII)
-PlannerFeature      Plan(20)    — compact index → intent + tool allowlist
+PlannerFeature      Plan(20)    — planner-prompt.md → intent + tool allowlist
+BrowserUseFeature   Plan(20)    — Windows only, when browser-use policy allows
 ToolsFeature        Tools(30)   — build OpenAI schema array
+HostToolsFeature    Tools(30)   — IAgentToolProvider schemas
 McpFeature          Tools(30)   — merge mcp.json tools + create bridge
-MemoryFeature       Context(40) — thread-local task scope + artifact persistence
-SnapshotFeature     Context(40) — P12 load/save named snapshots (after Memory)
-SkillsFeature       Context(40) — inject active SKILL.md bodies
-SystemPromptFeature Prompt(50)  — assemble final system prompt
-SelfCheckFeature    Finish(60)  — P9 structural quality gate (last to run)
+MemoryFeature       Context(40) — task scope; persist artifacts / turn_pairs on finish
+ToolCheckpoints     Context(40) — optional replaceable tool outcomes
+MemoryRecallFeature Context(40) — hybrid recall index + pending inject
+SnapshotFeature     Context(40) — load/save named snapshots (after Memory)
+SkillsFeature       Context(40) — skill catalog summary
+AgentMdFeature      Context(40) — Agent.md from the working folder
+WorkflowFeature     Context(40) — workflow inject into system_extra
+SystemPromptFeature Prompt(50)  — system-prompt.md + dynamic session blocks
+SelfCheckFeature    Finish(60)  — structural quality gate (last to run)
 ```
+
+Android builds the same chain minus the Windows-only browser feature, and
+loads `*.android.md` for the system, planner, and realtime prompts. The
+exact multi-turn path — what is stored, what is injected, what is evicted —
+is [agent-context.md](agent-context.md). The pipeline list above is the
+order in `AgentFactory::default_agent()`.
 
 The `Agent::run()` loop calls `on_prepare(Turn&, ProviderSettings&, PreparedRun&)` on
 each feature in order, then runs the LLM+tool loop, then calls `on_finish` on each
@@ -515,4 +530,26 @@ SuperClaude gap analysis and P1–P8 proposals").*
 
 ---
 
-*Last updated: 2026-05-29 — P9 (SelfCheckFeature) and P12 (named snapshots) added*
+## 8. Multi-turn context
+
+`SystemPromptFeature` does not receive the chat transcript. The wire is
+the system message, optional daemon `seed_chat_messages` (unused by
+desktop chat and Android), and the current user message. Prior turns
+enter only through `turn.memory_state` / `turn.recent_events`, and only
+when `task_id` is set.
+
+`ReplayTranscript` is off by default, so the loaded event ring is not
+rendered. Continuity is the last four `turn_pair` rows (`## Recent turns`),
+a short artifact list, session rules, and an optional recall block. Full
+replies stay in the run log until `memory_find`. Facts written by
+`memory_write` without `task_id` go to `default_memory.doc` and are not
+pasted into the next system prompt, despite the tool's success text.
+
+Eviction (`EvictOldest`) puts those turn pairs in the same 50-slot LRU as
+file artifacts. They are not re-bumped unless the next prompt contains a
+locator they usually do not have.
+
+That is the same-session re-hint path, including on Android. Flow, budgets,
+and the open questions are in [agent-context.md](agent-context.md).
+
+*Last updated: 2026-11-25 — pipeline matched to `default_agent()`; multi-turn context linked.*

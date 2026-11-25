@@ -150,35 +150,64 @@ void append_runtime_environment_context(std::ostringstream& s);
 /// `emit_selection` / `emit_open_files` / `emit_folder` stay on for any of those
 /// blocks the external file did not already substitute. A file that names only
 /// one placeholder must not suppress the others.
+/// Which dynamic sections the tooling block may emit. Designated
+/// initializers at the call site name the section being switched.
+struct ContextSections {
+    bool identity = true;
+    bool selection = true;
+    bool open_files = true;
+    bool folder = true;
+    bool editor = true;
+};
+
 void append_agent_tooling_and_context(std::ostringstream& s,
                                       const Turn& turn,
                                       const nlohmann::json& tools,
-                                      bool emit_identity = true,
-                                      bool emit_selection = true,
-                                      bool emit_open_files = true,
-                                      bool emit_folder = true);
+                                      ContextSections sections = {});
 
 // ── Shared session-memory rendering ───────────────────────────────────────────
 //
 // Used by both the main-agent system prompt builder (`agent_context.cpp`)
 // and the planner pass (`agent_feature.cpp`) so we ship the same compact
-// view to both LLM calls. Sort is LRU-aware: items with `last_used_at` are
-// sorted by that timestamp descending, falling back to `created_at`.
+// view to both LLM calls. Sort key is `last_used_at`, or `created_at` when
+// last-used is missing. Equal keys then compare `created_at`, then id.
 //
 // `chars_budget` caps the total injected block size; `max_items` caps the
 // item count regardless of budget. Pass 0 to either to use defaults.
+// `advertise_recall` is false when `memory_find` is not in the tool list;
+// the block then keeps locator fields and omits retrieval instructions.
 
 void append_session_items(std::ostringstream& s,
                           const nlohmann::json& memory_state,
                           std::size_t chars_budget = 0,
-                          std::size_t max_items = 0);
+                          std::size_t max_items = 0,
+                          bool advertise_recall = false);
 
-/// Last N turn_pair items as a compact User/Assistant tail. Pass 0 for
-/// k_recent_turns_inject_max. Empty when memory has no conversation pairs.
+/// Last N turn_pair items. `include_quotes` is false when those pairs are
+/// already native user/assistant messages; tool hints and recall handles stay.
+struct RecentTurnView {
+    std::size_t max_turns = 0;
+    bool advertise_body_recall = false;
+    bool include_quotes = true;
+};
+
 void append_recent_turns(std::ostringstream& s,
                          const nlohmann::json& memory_state,
-                         std::size_t max_turns = 0,
-                         bool advertise_body_recall = true);
+                         RecentTurnView view = {});
+
+/// Completed turn pairs as native roles, oldest first. Skips the live user
+/// prompt. The previous assistant reply is loaded from the agent log when
+/// that reply fits the history budget; otherwise the stored excerpt plus a
+/// memory_find handle. The JSON `memory_state` must outlive nothing here:
+/// the returned strings own their text.
+struct DialogueMessage {
+    std::string role;
+    std::string content;
+};
+
+std::vector<DialogueMessage> recent_dialogue_messages(
+    const nlohmann::json& memory_state,
+    std::string_view current_user);
 
 /// Same-directory replace. The destination is left intact when the replace
 /// fails. `from` is removed only after a successful replace, or by the caller

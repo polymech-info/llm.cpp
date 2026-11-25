@@ -1565,6 +1565,14 @@ Result Agent::run(const Turn&             turn,
                 continue;
             messages.push_back({role, content, {}, nlohmann::json()});
         }
+    } else if (pm::llm::has_feature(working.structured_memory_features,
+                                    pm::llm::StructuredMemoryFeature::InjectRecentMessages)) {
+        for (const auto& prior : detail::recent_dialogue_messages(
+                 working.memory_state, working.user_prompt)) {
+            if (prior.content.empty())
+                continue;
+            messages.push_back({prior.role, prior.content, {}, nlohmann::json()});
+        }
     }
     messages.push_back({"user",   working.user_prompt,     {}, nlohmann::json()});
 

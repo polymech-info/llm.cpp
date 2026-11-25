@@ -115,14 +115,17 @@ void memory_recall_remove_session_items(
     const std::vector<std::string>& item_ids,
     const std::string& embed_model_hint = {});
 
-/// Score query, suppress hits already in the recent Session Items window, and
-/// store a pending inject block for the next turn (HybridRecallSearch).
+/// Score `query` (the current user request). Hits already shown in full in
+/// the recent item window are dropped. Turn-pair summaries are not: the
+/// prompt only has an excerpt. When `block_out` is set, the formatted block
+/// is written there and nothing is stored for a later turn.
 MemoryRecallTelemetry memory_recall_enqueue_pending(
     const std::string& session_id,
     std::string_view query,
     const nlohmann::json& memory_state,
     pm::llm::StructuredMemoryFeatures features,
-    const std::string& embed_model_hint = {});
+    const std::string& embed_model_hint = {},
+    std::string* block_out = nullptr);
 
 /// Take and clear pending recall for session_id (InjectPendingRecall / on_prepare).
 std::optional<std::string> memory_recall_take_pending(const std::string& session_id);

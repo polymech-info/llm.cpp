@@ -47,7 +47,7 @@ const QUESTIONS = {
     criteria: {
       drop: 'Do not store it. A help dump, a catalog body, or a detail with nothing to learn.',
       session: 'Short-term artifact for this chat only: the output path, the files touched, the command that worked, or the ask.',
-      durable: 'Long-term memory_write fact for later chats: an environment fact, a standing project locator, or a preference. Keep it small.',
+      durable: 'Long-term memory_write with scope "global" for later chats: an environment fact, a standing project locator, or a preference. Keep it small.',
       both: 'Needed as a session artifact now, and still true as a memory_write fact in later chats.',
     },
   },

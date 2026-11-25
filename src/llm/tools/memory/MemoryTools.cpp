@@ -275,10 +275,45 @@ bool default_memory_doc_write(const nlohmann::json& patch,
 
 // ── Tool implementations ──────────────────────────────────────────────────
 
-ExecuteResult do_memory_read(const nlohmann::json& args) {
-    std::string id = args.value("task_id", std::string{});
+std::string arg_string(const nlohmann::json& args, const char* key) {
+    if (!args.is_object() || !args.contains(key) || !args[key].is_string())
+        return {};
+    return args[key].get<std::string>();
+}
 
-    // Explicit task_id → read scheduler/session task-store entry.
+bool scope_is_global(const nlohmann::json& args) {
+    return media::strutil::lower_ascii(arg_string(args, "scope")) == "global";
+}
+
+ExecuteResult do_memory_read(const nlohmann::json& args) {
+    if (scope_is_global(args)) {
+        std::string err;
+        const nlohmann::json memory_state = default_memory_doc_read(err);
+        if (!err.empty())
+            return simple_error("memory_read: " + err);
+        const nlohmann::json memory_items = default_memory_doc_read_items(err);
+        if (!err.empty())
+            return simple_error("memory_read: " + err);
+        const bool empty = memory_state.empty() ||
+                           (memory_state.is_object() && memory_state.empty());
+        ExecuteResult r;
+        r.ok = true;
+        r.envelope = nlohmann::json{
+            {"ok",      true},
+            {"state",   memory_state},
+            {"items",   memory_items},
+            {"source",  "default_memory"},
+            {"message", empty ? "No persistent facts stored yet."
+                              : "Persistent user memory loaded."},
+        };
+        return r;
+    }
+
+    std::string id = arg_string(args, "task_id");
+    if (id.empty())
+        id = media::llm::agent::get_current_task_id();
+
+    // Explicit or current session → scheduler/session task-store entry.
     if (!id.empty()) {
         const auto task = media::llm::agent::task_store_get(id);
         const auto session = task ? std::nullopt : media::llm::agent::session_memory_get(id);
@@ -299,37 +334,40 @@ ExecuteResult do_memory_read(const nlohmann::json& args) {
         return r;
     }
 
-    // Default path → load global long-term memory document.
-    std::string err;
-    const nlohmann::json memory_state = default_memory_doc_read(err);
-    if (!err.empty())
-        return simple_error("memory_read: " + err);
-    const nlohmann::json memory_items = default_memory_doc_read_items(err);
-    if (!err.empty())
-        return simple_error("memory_read: " + err);
-
-    const bool empty = memory_state.empty() ||
-                       (memory_state.is_object() && memory_state.empty());
-    ExecuteResult r;
-    r.ok = true;
-    r.envelope = nlohmann::json{
-        {"ok",      true},
-        {"state",   memory_state},
-        {"items",   memory_items},
-        {"source",  "default_memory"},
-        {"message", empty ? "No facts stored yet. Use memory_write to save some."
-                          : "Memory loaded successfully."},
-    };
-    return r;
+    return simple_error(
+        "memory_read: no active session. Pass scope=\"global\" for persistent user memory.");
 }
 
 ExecuteResult do_memory_write(const nlohmann::json& args) {
     if (!args.contains("state") || !args["state"].is_object())
         return simple_error("memory_write: 'state' (object) is required");
 
-    const std::string id = args.value("task_id", std::string{});
+    if (scope_is_global(args)) {
+        const std::vector<std::string> tags =
+            args.contains("tags") ? normalize_tags(args["tags"]) : std::vector<std::string>{};
+        std::string err;
+        if (!default_memory_doc_write(args["state"], tags, err))
+            return simple_error("memory_write: " + (err.empty() ? "secure storage unavailable" : err));
+        ExecuteResult r;
+        r.ok = true;
+        r.envelope = nlohmann::json{
+            {"ok",      true},
+            {"saved",   args["state"]},
+            {"tags",    tags},
+            {"updated_at", media::llm::agent::now_iso8601()},
+            {"source",  "default_memory"},
+            {"scope",   "global"},
+            {"message", "Saved to persistent user memory. It is not pasted into the next prompt. "
+                        "Use memory_read(scope=\"global\") or memory_find to retrieve it."},
+        };
+        return r;
+    }
 
-    // Explicit task_id → write into scheduler/session task-store entry.
+    std::string id = arg_string(args, "task_id");
+    if (id.empty())
+        id = media::llm::agent::get_current_task_id();
+
+    // Omitted task_id is the current session. Global memory requires scope.
     if (!id.empty()) {
         const bool saved = media::llm::agent::task_store_get(id)
             ? media::llm::agent::schedule_write_memory(id, args["state"])
@@ -338,34 +376,20 @@ ExecuteResult do_memory_write(const nlohmann::json& args) {
             return simple_error("memory_write: task context not found: " + id);
         ExecuteResult r;
         r.ok = true;
+        const bool scheduled = media::llm::agent::task_store_get(id).has_value();
         r.envelope = nlohmann::json{
             {"ok",      true},
             {"saved",   args["state"]},
-            {"source",  "task"},
-            {"message", "Memory saved. It will be injected into your system prompt on the next turn."},
+            {"source",  scheduled ? "task" : "session"},
+            {"message", scheduled
+                ? "Saved on this scheduled task."
+                : "Saved in this session. Later turns of this chat can read it with memory_read."},
         };
         return r;
     }
 
-    const std::vector<std::string> tags =
-        args.contains("tags") ? normalize_tags(args["tags"]) : std::vector<std::string>{};
-
-    // Default path → global long-term memory document.
-    std::string err;
-    if (!default_memory_doc_write(args["state"], tags, err))
-        return simple_error("memory_write: " + (err.empty() ? "secure storage unavailable" : err));
-
-    ExecuteResult r;
-    r.ok = true;
-    r.envelope = nlohmann::json{
-        {"ok",      true},
-        {"saved",   args["state"]},
-        {"tags",    tags},
-        {"updated_at", media::llm::agent::now_iso8601()},
-        {"source",  "default_memory"},
-        {"message", "Memory saved. It will be injected into your system prompt on the next turn."},
-    };
-    return r;
+    return simple_error(
+        "memory_write: no active session. Pass scope=\"global\" for persistent user memory.");
 }
 
 ExecuteResult do_memory_append_event(const nlohmann::json& args) {
@@ -873,11 +897,12 @@ ExecuteResult do_memory_find(const nlohmann::json& args) {
 ToolDef make_memory_read() {
     return ToolDef{
         "memory_read",
-        "Read persistent long-term memory and per-item metadata.",
+        "Read facts for the current session. Pass scope=\"global\" for persistent user memory.",
         nlohmann::json{
             {"type", "object"},
             {"properties", {
-                {"task_id", {{"type", "string"}, {"description", "Optional: read a scheduled task's memory instead."}}},
+                {"task_id", {{"type", "string"}, {"description", "Optional session or scheduled-task id. Omit to use the current session. Do not invent one."}}},
+                {"scope", {{"type", "string"}, {"description", "Omit for the current session. \"global\" reads persistent user memory."}}},
             }},
         }};
 }
@@ -885,15 +910,17 @@ ToolDef make_memory_read() {
 ToolDef make_memory_write() {
     return ToolDef{
         "memory_write",
-        "Merge a JSON object into long-term memory. Use to store facts, preferences, or context "
-        "across turns. null values delete keys; {} clears all memory. Keep values small.",
+        "Merge a JSON object into the current session. Pass scope=\"global\" to store a "
+        "persistent user fact. null values delete keys; {} clears that store. Keep values small. "
+        "Never store credentials, API keys, passwords, tokens, or private keys.",
         nlohmann::json{
             {"type", "object"},
             {"properties", {
                 {"state", {{"type", "object"}, {"description", "Partial object to merge. null deletes a key; {} clears all."}}},
+                {"scope", {{"type", "string"}, {"description", "Omit for the current session. \"global\" writes persistent user memory."}}},
                 {"tags", {{"type", "array"},
                           {"items", {{"type", "string"}}},
-                          {"description", "Optional tags applied to every key in this write."}}},
+                          {"description", "Optional tags applied to every key in a global write."}}},
             }},
             {"required", nlohmann::json::array({"state"})},
         }};

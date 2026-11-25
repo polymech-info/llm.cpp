@@ -8,6 +8,7 @@
 #include "policy/app_policy.hpp"
 #endif
 #include "agent_internal.hpp"  // detail::, build_system_prompt
+#include "string/string_utils.hpp"
 
 #if defined(FEATURE_HOME_LLM_TOOLS) && FEATURE_HOME_LLM_TOOLS
 #include "path_tool_catalog.hpp"
@@ -179,13 +180,23 @@ void append_planner_session_memory(std::ostringstream& user, const Turn& turn)
     if (pm::llm::has_feature(turn.structured_memory_features, SMF::InjectItems)) {
         // Last-4 conversation tail first so terse follow-ups ("go", "do it")
         // route against the unfinished ask, not leftover explorer selection.
-        detail::append_recent_turns(user, memory_state);
+        bool memory_find_enabled = true;
+        for (const auto& name : turn.disabled_path_tools) {
+            if (media::strutil::lower_ascii(name) == "memory_find") {
+                memory_find_enabled = false;
+                break;
+            }
+        }
+        detail::append_recent_turns(user, memory_state, detail::RecentTurnView{
+            .advertise_body_recall = memory_find_enabled,
+        });
         // Give the planner the same recent-item window as the executor so an
         // exact prior artifact locator wins over a broad discovery glob.
         // The tighter byte budget still keeps routing inexpensive.
         constexpr std::size_t k_planner_items_budget = pm::llm::k_session_items_inject_chars / 2;
         constexpr std::size_t k_planner_items_count  = pm::llm::k_session_items_inject_max;
-        detail::append_session_items(user, memory_state, k_planner_items_budget, k_planner_items_count);
+        detail::append_session_items(user, memory_state, k_planner_items_budget,
+                                     k_planner_items_count, memory_find_enabled);
     }
     if (pm::llm::has_feature(turn.structured_memory_features, SMF::InjectRules)) {
         // Rules are short by nature; reuse the default cap.
@@ -1020,16 +1031,38 @@ public:
     FeaturePhase phase() const noexcept override { return FeaturePhase::Context; }
     const char* name() const noexcept override { return "memory_recall"; }
 
-    void on_prepare(Turn& turn, const ProviderSettings&, PreparedRun&) override {
+    void on_prepare(Turn& turn, const ProviderSettings&, PreparedRun& run) override {
         if (turn.task_id.empty()) return;
         using SMF = pm::llm::StructuredMemoryFeature;
-        if (!pm::llm::has_feature(turn.structured_memory_features, SMF::InjectPendingRecall))
+        // A block scored against an earlier prompt is not this request.
+        (void)memory_recall_take_pending(turn.task_id);
+        turn.pending_recall_inject.clear();
+        if (turn.structured_memory_features == 0)
             return;
-        if (auto pending = memory_recall_take_pending(turn.task_id))
-            turn.pending_recall_inject = std::move(*pending);
+        if (!pm::llm::has_feature(turn.structured_memory_features, SMF::InjectPendingRecall)
+            || !pm::llm::has_feature(turn.structured_memory_features, SMF::HybridRecallSearch))
+            return;
+        if (turn.user_prompt.empty())
+            return;
+
+        nlohmann::json memory_state = turn.memory_state;
+        if (!memory_state.is_object() || memory_state.empty()) {
+            nlohmann::json discarded = nlohmann::json::array();
+            session_load(turn.task_id, memory_state, discarded, 0);
+        }
+        std::string block;
+        const auto tel = memory_recall_enqueue_pending(
+            turn.task_id, turn.user_prompt, memory_state,
+            turn.structured_memory_features, turn.embed_model_path, &block);
+        if (!block.empty())
+            turn.pending_recall_inject = std::move(block);
+        if (pm::llm::has_feature(turn.structured_memory_features, SMF::EmitMemoryUpdate)) {
+            nlohmann::json payload{{"recall", tel.to_json()}};
+            (void)detail::emit(run.cb, Event{Event::MemoryUpdate, "", "", std::move(payload)});
+        }
     }
 
-    void on_finish(const Turn& turn, const Result& result, const PreparedRun& run) override {
+    void on_finish(const Turn& turn, const Result& result, const PreparedRun&) override {
         if (turn.task_id.empty() || turn.structured_memory_features == 0)
             return;
         if (!result.ok)
@@ -1037,28 +1070,14 @@ public:
         TaskIdGuard memory_scope(turn.task_id, turn.is_scheduled_tick);
 
         using SMF = pm::llm::StructuredMemoryFeature;
-        const bool index = pm::llm::has_feature(turn.structured_memory_features, SMF::IndexMemoryEntries);
-        const bool recall = pm::llm::has_feature(turn.structured_memory_features, SMF::HybridRecallSearch);
-        if (!index && !recall)
+        if (!pm::llm::has_feature(turn.structured_memory_features, SMF::IndexMemoryEntries))
             return;
 
         nlohmann::json memory_state = nlohmann::json::object();
         nlohmann::json discarded_events = nlohmann::json::array();
         session_load(turn.task_id, memory_state, discarded_events, 0);
-
-        if (index)
-            memory_recall_index_session_items(
-                turn.task_id, memory_state, turn.structured_memory_features, turn.embed_model_path);
-
-        if (recall && !turn.user_prompt.empty() && turn.pending_recall_inject.empty()) {
-            const auto tel = memory_recall_enqueue_pending(
-                turn.task_id, turn.user_prompt, memory_state,
-                turn.structured_memory_features, turn.embed_model_path);
-            if (pm::llm::has_feature(turn.structured_memory_features, SMF::EmitMemoryUpdate)) {
-                nlohmann::json payload{{"recall", tel.to_json()}};
-                (void)detail::emit(run.cb, Event{Event::MemoryUpdate, "", "", std::move(payload)});
-            }
-        }
+        memory_recall_index_session_items(
+            turn.task_id, memory_state, turn.structured_memory_features, turn.embed_model_path);
     }
 };
 

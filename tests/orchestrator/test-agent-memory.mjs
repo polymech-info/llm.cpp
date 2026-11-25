@@ -125,7 +125,7 @@ function suiteMemoryTools(rep, assert, ctx) {
     ...ctx,
     sessionId,
     prompt: isLive
-      ? 'Use the memory_write tool to store exactly: {"codename":"Nighthawk","phase":2}. After the tool succeeds reply: MEMORY_WRITTEN'
+      ? 'Use memory_write with no scope and no task_id to store exactly: {"codename":"Nighthawk","phase":2}. After the tool succeeds reply: MEMORY_WRITTEN'
       : 'memory-write-test',
     script: isLive ? undefined : [
       {
@@ -146,6 +146,10 @@ function suiteMemoryTools(rep, assert, ctx) {
   const writeResult = toolResultEnvelope(r1.bundlePath, 'memory_write');
   assert(writeResult?.ok === true, 'memory-tools r1: memory_write ok=true');
   assert(writeResult?.saved?.codename === 'Nighthawk', 'memory-tools r1: saved codename=Nighthawk');
+  if (isLive) {
+    assert(writeResult?.source === 'session',
+      `memory-tools r1 live: omitted scope stays in the session (source=${writeResult?.source})`);
+  }
   if (isLive) {
     assert(/MEMORY_WRITTEN/i.test(finalText(r1.bundlePath)),
       `memory-tools r1 live: final text contains MEMORY_WRITTEN (got ${truncateText(finalText(r1.bundlePath))})`);
@@ -686,14 +690,14 @@ function suiteMemoryCrossSession(rep, assert, ctx) {
     ...ctx,
     sessionId: `${baseSession}-a`,
     prompt: isLive
-      ? 'Use memory_write to store exactly: {"secret_token":"CrossSession42"}. After the tool succeeds reply: CROSS_WRITTEN'
+      ? 'Use memory_write with scope "global" and no task_id to store this hometown fact exactly: {"hometown":"LisbonHarbor"}. It is not a password, token, or credential. After the tool succeeds reply: CROSS_WRITTEN'
       : 'cross-session-write',
     script: isLive ? undefined : [
       {
         tool_calls: [{
           id: 'tc_xw1',
           name: 'memory_write',
-          arguments: { state: { secret_token: 'CrossSession42' } },
+          arguments: { scope: 'global', state: { secret_token: 'CrossSession42' } },
         }],
       },
       { text: 'CROSS_WRITTEN secret=CrossSession42' },
@@ -705,8 +709,16 @@ function suiteMemoryCrossSession(rep, assert, ctx) {
   assert(r1.status === 0, 'cross-session r1: exits 0');
   const writeResult = toolResultEnvelope(r1.bundlePath, 'memory_write');
   assert(writeResult?.ok === true, 'cross-session r1: memory_write ok=true');
-  assert(writeResult?.saved?.secret_token === 'CrossSession42',
-    'cross-session r1: saved secret_token=CrossSession42');
+  assert(isLive
+    ? writeResult?.saved?.hometown === 'LisbonHarbor'
+    : writeResult?.saved?.secret_token === 'CrossSession42',
+    isLive
+      ? 'cross-session r1: saved hometown=LisbonHarbor'
+      : 'cross-session r1: saved secret_token=CrossSession42');
+  if (isLive) {
+    assert(writeResult?.source === 'default_memory' && writeResult?.scope === 'global',
+      `cross-session r1 live: scope=global writes persistent memory (source=${writeResult?.source} scope=${writeResult?.scope})`);
+  }
   if (isLive) {
     assert(/CROSS_WRITTEN/i.test(finalText(r1.bundlePath)),
       `cross-session r1 live: final text contains CROSS_WRITTEN (got ${truncateText(finalText(r1.bundlePath))})`);
@@ -716,7 +728,7 @@ function suiteMemoryCrossSession(rep, assert, ctx) {
     ...ctx,
     sessionId: `${baseSession}-b`,
     prompt: isLive
-      ? 'Use memory_find with searchPastChats=true and query "CrossSession42" to search past sessions. Then reply: CROSS_FOUND'
+      ? 'Use memory_find with searchPastChats=true and query "LisbonHarbor" to search past sessions. Then reply: CROSS_FOUND'
       : 'cross-session-find',
     script: isLive ? undefined : [
       {
@@ -738,8 +750,9 @@ function suiteMemoryCrossSession(rep, assert, ctx) {
   assert(typeof findResult?.count === 'number' && findResult.count > 0,
     `cross-session r2: found prior-session matches (count=${findResult?.count})`);
   const items = Array.isArray(findResult?.items) ? findResult.items : [];
-  assert(items.some((it) => JSON.stringify(it).includes('CrossSession42')),
-    'cross-session r2: results include CrossSession42');
+  const marker = isLive ? 'LisbonHarbor' : 'CrossSession42';
+  assert(items.some((it) => JSON.stringify(it).includes(marker)),
+    `cross-session r2: results include ${marker}`);
   if (isLive) {
     assert(/CROSS_FOUND/i.test(finalText(r2.bundlePath)),
       `cross-session r2 live: final text contains CROSS_FOUND (got ${truncateText(finalText(r2.bundlePath))})`);
@@ -769,13 +782,14 @@ function suiteMemoryRecallPending(rep, assert, ctx) {
         tool_calls: [{
           id: 'tc_pref1',
           name: 'memory_write',
-          arguments: {
-            state: {
-              pet_name: 'Buddy',
-              pet_type: 'golden retriever',
-              pet_note: 'Loves fetch in the park',
+            arguments: {
+              scope: 'global',
+              state: {
+                pet_name: 'Buddy',
+                pet_type: 'golden retriever',
+                pet_note: 'Loves fetch in the park',
+              },
             },
-          },
         }],
       },
       { text: 'Got it - I saved Buddy the golden retriever.' },
@@ -788,22 +802,6 @@ function suiteMemoryRecallPending(rep, assert, ctx) {
   assert(r1.json?.ok === true, 'recall-pending r1: ok=true');
   assert(toolCalls(r1.bundlePath).includes('memory_write'), 'recall-pending r1: memory_write');
 
-  const tel1 = recallTelemetryFromBundle(r1.bundlePath);
-  assert(tel1, 'recall-pending r1: recall telemetry emitted');
-  assert(Number(tel1.candidates) >= 1, 'recall-pending r1: candidate pool non-empty');
-  assert(Number.isFinite(Number(tel1.bm25_ms)), 'recall-pending r1: bm25_ms present');
-  assert(Number.isFinite(Number(tel1.dense_ms)), 'recall-pending r1: dense_ms present');
-  assert(Number(tel1.overlap_suppressed) >= 1,
-    'recall-pending r1: overlap suppression drops recent Session Items hits');
-  assert(Number(tel1.ranked_hits) >= Number(tel1.overlap_suppressed),
-    'recall-pending r1: suppressed count bounded by ranked hits');
-
-  // memory_write facts live under default_memory (session_id=global), so they are
-  // NOT in the Session Items window and remain eligible for Recalled memory.
-  // Same-session recent IDs (e.g. turn_pair) are what overlap suppression drops.
-  assert(Number(tel1.injected_hits) >= 1 && tel1.pending_enqueued === true,
-    'recall-pending r1: global/default_memory hits still enqueue after overlap filter');
-
   const r2 = runAgentRound({
     ...ctx,
     env,
@@ -815,6 +813,13 @@ function suiteMemoryRecallPending(rep, assert, ctx) {
   });
   rep.step('turn 2 query', r2.ms, `ok=${r2.json?.ok}`);
   assert(r2.status === 0, 'recall-pending r2: exits 0');
+  const tel2 = recallTelemetryFromBundle(r2.bundlePath);
+  assert(tel2, 'recall-pending r2: recall telemetry emitted for the current question');
+  assert(Number(tel2.candidates) >= 1, 'recall-pending r2: candidate pool non-empty');
+  assert(Number.isFinite(Number(tel2.bm25_ms)), 'recall-pending r2: bm25_ms present');
+  assert(Number.isFinite(Number(tel2.dense_ms)), 'recall-pending r2: dense_ms present');
+  assert(Number(tel2.injected_hits) >= 1 && tel2.pending_enqueued === true,
+    'recall-pending r2: current question enqueues the global Buddy fact');
   const sys2 = systemPromptFromBundle(r2.bundlePath);
   assert(/## Recent turns/i.test(sys2),
     'recall-pending r2: Recent turns present');
@@ -861,7 +866,7 @@ function suiteMemoryRecallConsumer(rep, assert, ctx) {
         tool_calls: [{
           id: 'tc_trip1',
           name: 'memory_write',
-          arguments: { state: { vacation_codeword: 'SunnyBeach2026', trip: 'family beach week' } },
+            arguments: { scope: 'global', state: { vacation_codeword: 'SunnyBeach2026', trip: 'family beach week' } },
         }],
       },
       { text: 'Saved your trip codeword SunnyBeach2026.' },
@@ -885,24 +890,27 @@ function suiteMemoryRecallConsumer(rep, assert, ctx) {
   assert(tel2, 'recall-consumer r2: recall telemetry emitted');
   assert(Number(tel2.candidates) >= 1, 'recall-consumer r2: candidates >= 1');
   assert(tel2.pending_enqueued === true,
-    'recall-consumer r2: cross-session hit enqueued (not overlap-suppressed)');
+    'recall-consumer r2: current question enqueues the global fact');
   assert(Number(tel2.injected_bytes) > 0, 'recall-consumer r2: injected_bytes > 0');
+  const sys2 = systemPromptFromBundle(r2.bundlePath);
+  assert(/## Recalled memory/i.test(sys2),
+    'recall-consumer r2: recalled block is on the asking turn');
+  assert(/## Recalled memory[\s\S]*SunnyBeach2026/i.test(sys2),
+    'recall-consumer r2: recalled text mentions SunnyBeach2026');
 
   const r3 = runAgentRound({
     ...ctx,
     env,
     sessionId: `${base}-later`,
-    prompt: 'Remind me again about the trip codeword.',
-    script: [{ text: 'Your vacation codeword is SunnyBeach2026.' }],
+    prompt: 'Ok.',
+    script: [{ text: 'You are welcome.' }],
     roundKey: 'recall-consumer-r03',
-    roundMeta: { suite: 'memory-recall-consumer', index: 3, name: 'session B inject' },
+    roundMeta: { suite: 'memory-recall-consumer', index: 3, name: 'unrelated follow-up' },
   });
   assert(r3.status === 0 && r3.json?.ok === true, 'recall-consumer r3: ok');
   const sys3 = systemPromptFromBundle(r3.bundlePath);
-  assert(/## Recalled memory/i.test(sys3),
-    'recall-consumer r3: pending block injected on follow-up turn');
-  assert(/## Recalled memory[\s\S]*SunnyBeach2026/i.test(sys3),
-    'recall-consumer r3: recalled text mentions SunnyBeach2026');
+  assert(!/## Recalled memory/i.test(sys3),
+    'recall-consumer r3: an unrelated follow-up does not reuse the previous recall');
 
   rep.endSuite();
 }

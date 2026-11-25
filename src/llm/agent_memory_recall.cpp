@@ -9,6 +9,7 @@
 #include "llm/tools/memory/MemoryTools.hpp"
 
 #include "logging/logger.h"
+#include "string/string_sanitizers.hpp"
 
 #include <fstream>
 
@@ -203,6 +204,14 @@ std::vector<MemoryRecallCandidate> suppress_session_item_overlap(
         // Only suppress current-session rows that are already in the live window.
         // Cross-session / global hits are the point of recall.
         if (h.session_id == session_id && recent.count(h.item_id)) {
+            const std::string role = h.item.is_object() && h.item.contains("role")
+                && h.item["role"].is_string()
+                ? h.item["role"].get<std::string>() : std::string{};
+            // A turn_pair in the prompt is an excerpt. Keep it recallable.
+            if (role == "turn_pair") {
+                kept.push_back(std::move(h));
+                continue;
+            }
             ++suppressed_out;
             continue;
         }
@@ -539,6 +548,38 @@ std::vector<MemoryRecallCandidate> memory_recall_collect_candidates(
             push_candidate(session_id, id, item, out);
         }
     }
+    if (memory_state.is_object()) {
+        static constexpr std::string_view reserved[] = {
+            "items", "artifacts", "instructions", "journal_recovery",
+        };
+        for (auto it = memory_state.begin(); it != memory_state.end(); ++it) {
+            bool skip = it.key().empty() || it.key().size() > 128;
+            for (const auto key : reserved)
+                skip = skip || it.key() == key;
+            if (skip)
+                continue;
+            const std::string dedupe = session_id + '\0' + it.key();
+            if (!seen.insert(dedupe).second)
+                continue;
+            std::string summary;
+            if (it.value().is_string())
+                summary = it.value().get<std::string>();
+            else if (!it.value().is_null())
+                summary = it.value().dump();
+            if (summary.size() > 400)
+                summary = media::str_san::utf8_safe_ellipsize(summary, 400, "\u2026");
+            if (summary.empty())
+                continue;
+            nlohmann::json row = {
+                {"id", it.key()},
+                {"kind", "preference"},
+                {"role", "user_fact"},
+                {"value", it.value()},
+                {"summary", summary},
+            };
+            push_candidate(session_id, it.key(), row, out);
+        }
+    }
 
     collect_default_memory_candidates(out, seen);
 
@@ -758,12 +799,36 @@ nlohmann::json MemoryRecallTelemetry::to_json() const
     };
 }
 
+bool query_shares_token(std::string_view query, std::string_view text)
+{
+    const std::string q = media::strutil::lower_ascii(std::string(query));
+    const std::string hay = media::strutil::lower_ascii(std::string(text));
+    std::string token;
+    bool hit = false;
+    auto flush = [&]() {
+        if (token.size() >= 4 && hay.find(token) != std::string::npos)
+            hit = true;
+        token.clear();
+    };
+    for (unsigned char c : q) {
+        if (std::isalnum(c))
+            token.push_back(static_cast<char>(c));
+        else
+            flush();
+        if (hit)
+            return true;
+    }
+    flush();
+    return hit;
+}
+
 MemoryRecallTelemetry memory_recall_enqueue_pending(
     const std::string& session_id,
     std::string_view query,
     const nlohmann::json& memory_state,
     SMFs features,
-    const std::string& embed_model_hint)
+    const std::string& embed_model_hint,
+    std::string* block_out)
 {
     MemoryRecallTelemetry tel;
     drop_pending_if_store_changed();
@@ -785,6 +850,9 @@ MemoryRecallTelemetry memory_recall_enqueue_pending(
 
     auto hits = memory_recall_rank(query, candidates, settings,
                                    features, embed_model_hint, &tel);
+    hits.erase(std::remove_if(hits.begin(), hits.end(), [&](const MemoryRecallCandidate& hit) {
+        return !query_shares_token(query, hit.search_text);
+    }), hits.end());
 
     std::size_t suppressed = 0;
     hits = suppress_session_item_overlap(session_id, memory_state, std::move(hits), suppressed);
@@ -801,14 +869,10 @@ MemoryRecallTelemetry memory_recall_enqueue_pending(
     tel.injected_bytes = block.size();
 
     if (!block.empty()) {
-        if (!persist_pending_recall(session_id, block)) {
-            logger::warn("memory_recall_enqueue_pending: failed to persist pending block for "
-                         + session_id);
-        } else {
-            std::lock_guard<std::mutex> lk(pending_mutex());
-            pending_by_session()[session_id] = block;
-            tel.pending_enqueued = true;
-        }
+        if (block_out)
+            *block_out = block;
+        tel.pending_enqueued = true;
+        clear_pending_recall_file(session_id);
     }
 
     tel.total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

@@ -6,6 +6,7 @@ background injection, and durability follow-ups — not a second comparison essa
 
 Related:
 
+- [agent-context.md](./agent-context.md) — exact multi-turn flow, prompts, eviction, open questions
 - [jcode.md](./jcode.md) — full jcode vs PixlWiz analysis
 - [embeddings.md](../embeddings.md) — local vector index design (`VectorStore`, USearch target)
 - [vector-store-local.md](./vector-store-local.md) — shipped GGUF `VectorStore` (dense leg only)
@@ -35,19 +36,18 @@ That means:
 | Concern | Location | Behavior |
 |---------|----------|----------|
 | Per-session `memory_state`, events, artifacts | `src/llm/agent_memory.cpp`, `agent_memory_artifacts.cpp` | End-of-turn persistence, item caps, error reflexions |
-| Prompt injection (items, rules, transcript replay) | `src/llm/agent_context.cpp`, `agent_feature.cpp` | **Recency + byte budgets**, not broad retrieval |
+| Prompt injection (items, rules, recent turns) | `src/llm/agent_context.cpp`, `agent_feature.cpp` | **Recency + byte budgets**, not broad retrieval. `ReplayTranscript` is off. See [agent-context.md](./agent-context.md). |
 | Feature bitmask (`InjectItems`, `ReplayTranscript`, …) | `src/llm/llm_constants.hpp` | Controls what gets injected |
 | Memory tools | `src/llm/tools/memory/MemoryTools.cpp` | `memory_read` / `memory_write` / `memory_find` |
 | Journal + recovery v1 | `agent_factory.cpp`, `session_recover_from_journal()` | Mid-turn journal; promote path outputs on `session_load()` |
 
-Injection today is **deterministic caps**, not candidate retrieval:
-
-```155:191:src/llm/agent_context.cpp
-void append_session_items(..., chars_budget, max_items)
-{
-    // newest-first sort, stop at max_items / chars_budget
-}
-```
+Injection today is **deterministic caps**, not candidate retrieval.
+`append_session_items` walks newest-first and stops at `max_items` /
+`chars_budget` (defaults 10 items, 4000 bytes; the planner uses half).
+`append_recent_turns` adds at most four `turn_pair` rows. `recent_events`
+are rendered only when `ReplayTranscript` is on, which the default mask
+clears. The function bodies are in `agent_context.cpp`; do not treat an
+old line range as stable.
 
 ### Cross-session aggregation (not hybrid ranker)
 
@@ -73,6 +73,30 @@ if (search_past_chats) {
 ```
 
 **Gap:** `query_store` is the right **candidate pool**; ranking is still naive.
+
+### Same-session continuity (review)
+
+This is separate from the hybrid-recall roadmap, and it is the failure
+users hit when a follow-up in the same chat needs a re-hint. Android is
+the loud case. Desktop uses the same builder.
+
+The text agent does not resend the thread. Continuity is the system
+prompt. `ReplayTranscript` is off, so the event ring loaded by
+`session_load` (last 20 of 50) is not shown. The model sees four short
+turn pairs, a handful of artifacts, and rules that say "act on the newest
+item". The full reply is a `memory_find` call. `memory_write` without
+`task_id` stores `default_memory.doc` and tells the model the next system
+prompt will contain it. The builder never reads that file. Hybrid recall
+may surface it one turn later if the new sentence matches.
+
+Eviction is one LRU of 50 items (`EvictOldest` in
+`agent_memory_artifacts.cpp`). `turn_pair` rows share it with artifacts
+and are not bumped unless the next prompt contains a path, index, or url.
+Rules cap at 20. `default_memory.doc` is outside that evictor.
+
+Budgets, the three prompts (system, planner, realtime), and the question
+list are in [agent-context.md](./agent-context.md). The recall work below
+does not, by itself, put the previous utterance back into the prompt.
 
 ### Exact assistant-turn continuity
 
